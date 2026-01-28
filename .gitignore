@@ -1,0 +1,26 @@
+# secrets
+.env
+
+# python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# logs
+logs/
+*.log
+
+# runtime data
+data/state.db
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# build
+dist/
+build/
+*.egg-info/

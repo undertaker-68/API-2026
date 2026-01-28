@@ -1,0 +1,16 @@
+[Unit]
+Description=Ozon -> MoySklad sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ms-ozon-sync
+EnvironmentFile=/opt/ms-ozon-sync/.env
+ExecStart=/opt/ms-ozon-sync/venv/bin/python -m app.main
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
