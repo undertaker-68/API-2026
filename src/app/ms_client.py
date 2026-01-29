@@ -9,10 +9,11 @@ class MSClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.base = cfg.ms_base_url.rstrip("/")
+        # MoySklad строго требует Accept = application/json;charset=utf-8
         self.headers = {
             "Authorization": f"Bearer {cfg.ms_token}",
-            "Content-Type": "application/json",
             "Accept": "application/json;charset=utf-8",
+            "Content-Type": "application/json;charset=utf-8",
         }
 
     # --- low-level http with error body logging
@@ -32,11 +33,15 @@ class MSClient:
             raise
 
         if r.status_code >= 400:
-            # IMPORTANT: show server-side validation message
-            log.error("MS %s %s failed: %s %s | params=%s | body_keys=%s",
-                      method, path, r.status_code, r.text,
-                      params, list(body.keys()) if isinstance(body, dict) else None)
-            # raise with body for higher level logs
+            log.error(
+                "MS %s %s failed: %s %s | params=%s | body_keys=%s",
+                method,
+                path,
+                r.status_code,
+                r.text,
+                params,
+                list(body.keys()) if isinstance(body, dict) else None,
+            )
             raise requests.HTTPError(f"{r.status_code} {r.text}", response=r)
 
         if not r.text:
@@ -57,13 +62,12 @@ class MSClient:
     def find_assortment_by_article(self, article: str):
         """
         Надёжно: ищем по /entity/assortment?search=... и делаем exact match по article.
-        Возвращает row (может быть product / bundle / variant).
+        Возвращает row (product/bundle/variant).
         """
         target = str(article).strip()
         if not target:
             return None
 
-        # search на assortment обычно работает стабильнее, чем filter/article на product/bundle
         res = self._get("/entity/assortment", params={"search": target, "limit": 100})
         rows = res.get("rows") or []
         for r in rows:
@@ -76,21 +80,16 @@ class MSClient:
         if not row:
             return None
         meta = (row.get("meta") or {})
-        if meta.get("type") == "product":
-            return row
-        return None
+        return row if meta.get("type") == "product" else None
 
     def find_bundle_by_article(self, article: str):
         row = self.find_assortment_by_article(article)
         if not row:
             return None
         meta = (row.get("meta") or {})
-        if meta.get("type") == "bundle":
-            return row
-        return None
+        return row if meta.get("type") == "bundle" else None
 
     def get_bundle_components(self, bundle_id: str) -> list[dict]:
-        # /entity/bundle/{id} возвращает components
         b = self._get(f"/entity/bundle/{bundle_id}")
         return b.get("components") or []
 
@@ -104,7 +103,7 @@ class MSClient:
 
     def find_customer_order_by_name(self, name: str):
         """
-        Надёжно: search + exact match по name (filter=name у тебя ломается).
+        Надёжно: search + exact match по name (filter=name часто ломается).
         """
         target = str(name).strip()
         if not target:
