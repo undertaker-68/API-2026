@@ -12,7 +12,7 @@ class MSClient:
         self.headers = {
             "Authorization": f"Bearer {cfg.ms_token}",
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "application/json;charset=utf-8",
         }
 
     # --- low-level http with error body logging
