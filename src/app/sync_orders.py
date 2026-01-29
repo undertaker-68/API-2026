@@ -99,7 +99,7 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
             order_id = s.ms_order_id
 
             # --- создание заказа
-            if not order_id and oz_status == "awaiting_packaging":
+            if not order_id and oz_status in ("awaiting_packaging", "awaiting_deliver"):
                 existing_id, name = ensure_order(ms, posting_number)
                 if existing_id:
                     order_id = existing_id
