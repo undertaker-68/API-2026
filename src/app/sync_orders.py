@@ -118,7 +118,7 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
     log.info("cutoff window: %s .. %s", cutoff_from, cutoff_to)
 
     # Берём по статусам отдельно (проще и детерминированно)
-    for status in ("awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled"):
+    for status in ("awaiting_packaging", "awaiting_deliver", "delivering"):
         try:
             resp = ozon.unfulfilled_list(cutoff_from, cutoff_to, status=status, limit=50, offset=0)
         except Exception as e:
