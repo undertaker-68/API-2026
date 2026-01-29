@@ -30,16 +30,27 @@ class MSClient:
         return r.json()
 
     # --- Catalog
-    def find_product_by_article(self, article: str) -> dict | None:
-        safe = str(name).replace('"', '\\"')
-        res = self._get("/entity/customerorder", params={"filter": f'name="{safe}"'})
-        rows = res.get("rows") or []
-        return rows[0] if rows else None
+    def find_product_by_article(self, article: str):
+        target = str(article).strip()
+        try:
+            res = self._get("/entity/product", params={"search": target, "limit": 100})
+        except Exception:
+            return None
+        for r in (res.get("rows") or []):
+            if str(r.get("article") or "").strip() == target:
+                return r
+        return None
 
-    def find_bundle_by_article(self, article: str) -> dict | None:
-        res = self._get("/entity/bundle", params={"filter": f"article={article}"})
-        rows = res.get("rows") or []
-        return rows[0] if rows else None
+    def find_bundle_by_article(self, article: str):
+        target = str(article).strip()
+        try:
+            res = self._get("/entity/bundle", params={"search": target, "limit": 100})
+        except Exception:
+            return None
+        for r in (res.get("rows") or []):
+            if str(r.get("article") or "").strip() == target:
+                return r
+        return None
 
     def get_bundle_components(self, bundle_id: str) -> list[dict]:
         # /entity/bundle/{id} возвращает components
