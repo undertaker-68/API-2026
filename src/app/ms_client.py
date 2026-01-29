@@ -55,11 +55,16 @@ class MSClient:
         return prices[0].get("value")
 
     # --- Orders
-    def find_customer_order_by_name(self, name: str) -> dict | None:
-        safe = str(name).replace('"', '\\"')
-        res = self._get("/entity/customerorder", params={"filter": f'name="{safe}"'})
-        rows = res.get("rows") or []
-        return rows[0] if rows else None
+    def find_customer_order_by_name(self, name: str):
+        target = str(name).strip()
+        try:
+            res = self._get("/entity/customerorder", params={"search": target, "limit": 100})
+        except Exception:
+            return None
+        for r in (res.get("rows") or []):
+            if str(r.get("name") or "").strip() == target:
+                return {"id": r.get("id")}
+        return None
 
     def get_customer_order(self, order_id: str) -> dict:
         return self._get(f"/entity/customerorder/{order_id}")
