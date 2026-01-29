@@ -55,7 +55,8 @@ class MSClient:
 
     # --- Orders
     def find_customer_order_by_name(self, name: str) -> dict | None:
-        res = self._get("/entity/customerorder", params={"filter": f"name={name}"})
+        safe = str(name).replace('"', '\\"')
+        res = self._get("/entity/customerorder", params={"filter": f'name="{safe}"'})
         rows = res.get("rows") or []
         return rows[0] if rows else None
 
