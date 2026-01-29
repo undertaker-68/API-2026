@@ -105,6 +105,11 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                     order_id = existing_id
                 else:
                     positions = build_ms_positions(ms, posting.get("products") or [])
+                    if not positions:
+                        log.warning("MS skip create CustomerOrder posting=%s: no positions (products not mapped)", posting_number)
+                        # помечаем как забытый, чтобы не долбиться бесконечно
+                        store.upsert(OrderState(posting_number, None, oz_status, s.demand_created, s.move_created, 1, now_ts, 0))
+                        continue
                     if not cfg.dry_run:
                         created = ms.create_customer_order({
                             "name": name,
