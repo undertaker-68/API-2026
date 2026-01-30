@@ -169,12 +169,50 @@ class MSClient:
     # Assortment / Bundle lookup by article
     # -----------------------------
     def find_assortment_by_article_search_exact(self, article: str) -> Optional[dict]:
+        """
+        Ищем ассортимент по article максимально надёжно:
+        - search по кандидату
+        - строгий exact-match ПОСЛЕ нормализации
+        Нормализация:
+        - trim
+        - замена кириллица/латиница
+        - длинные тире -> '-'
+        - удаление ведущих нулей (00094 == 94)
+        """
+
+        def norm(a: str) -> str:
+            a = (a or "").strip()
+            if not a:
+                return ""
+            a = a.replace("—", "-").replace("–", "-")
+            a = self._swap_lookalike_letters(a)
+            a = a.lstrip("0")  # КЛЮЧЕВОЕ: 00094 == 94
+            return a
+
+        target_variants = []
         for cand in self._article_candidates(article):
-            res = self._get("/entity/assortment", params={"search": cand, "limit": 100, "offset": 0})
+            n = norm(cand)
+            if n and n not in target_variants:
+                target_variants.append(n)
+
+        if not target_variants:
+            return None
+
+        for cand in self._article_candidates(article):
+            res = self._get("/entity/assortment", params={
+                "search": cand,
+                "limit": 100,
+                "offset": 0,
+            })
             rows = res.get("rows") or []
+
             for r in rows:
-                if (r.get("article") or "").strip() == cand:
+                art = norm(r.get("article"))
+                if not art:
+                    continue
+                if art in target_variants:
                     return r
+
         return None
 
     def get_bundle(self, bundle_id: str) -> dict:
