@@ -1,6 +1,5 @@
 import logging
 import requests
-from urllib.parse import quote
 
 from app.config import Config
 
@@ -11,6 +10,7 @@ class MSClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.base = cfg.ms_base_url.rstrip("/")
+
         # MoySklad строго требует Accept = application/json;charset=utf-8
         self.headers = {
             "Authorization": f"Bearer {cfg.ms_token}",
@@ -72,7 +72,6 @@ class MSClient:
         a = str(article).strip()
         if not a:
             return None
-        # exact filter (часто работает быстрее/точнее чем search)
         res = self._get("/entity/bundle", params={"filter": f"article={a}", "limit": 1})
         return self._first_row(res)
 
@@ -96,49 +95,37 @@ class MSClient:
 
     def find_assortment_by_article_search_exact(self, article: str) -> dict | None:
         """
-        Надёжно: /entity/assortment?search=... и exact match по article.
-        Возвращает row (product/bundle/variant).
+        Надёжно в реальной жизни: /entity/assortment?search=... + exact match по article.
         """
         target = str(article).strip()
         if not target:
             return None
 
         res = self._get("/entity/assortment", params={"search": target, "limit": 100})
-        rows = res.get("rows") or []
-        for r in rows:
+        for r in (res.get("rows") or []):
             if str(r.get("article") or "").strip() == target:
                 return r
         return None
 
     def get_bundle_components(self, bundle_id: str) -> list[dict]:
-        """
-        Возвращает components.rows, где у каждого компонента есть:
-        - quantity
-        - assortment.meta (+ если expand, то assortment содержит поля)
-        """
         b = self._get(f"/entity/bundle/{bundle_id}", params={"expand": "components.assortment"})
         comps = b.get("components") or {}
         rows = comps.get("rows") if isinstance(comps, dict) else None
         return rows or []
 
     def get_by_meta_href(self, href: str) -> dict:
-        """
-        href приходит в meta.href (полный URL). Делаем GET напрямую.
-        """
-        try:
-            r = requests.get(href, headers=self.headers, timeout=30)
-            if r.status_code >= 400:
-                log.error("MS GET meta href failed: %s %s", r.status_code, r.text)
-                raise requests.HTTPError(f"{r.status_code} {r.text}", response=r)
-            return r.json()
-        except Exception:
-            raise
+        # meta.href полный URL — делаем GET напрямую
+        r = requests.get(href, headers=self.headers, timeout=30)
+        if r.status_code >= 400:
+            log.error("MS GET meta href failed: %s %s", r.status_code, r.text)
+            raise requests.HTTPError(f"{r.status_code} {r.text}", response=r)
+        return r.json()
 
     @staticmethod
     def get_sale_price_value(entity: dict) -> int | None:
         """
-        В МС salePrices[].value — цена в копейках.
-        Берём первый уровень цены (MVP).
+        salePrices[].value — цена в копейках.
+        Берём первый уровень (MVP).
         """
         prices = entity.get("salePrices") or []
         if not prices:
@@ -152,11 +139,13 @@ class MSClient:
 
     def find_customer_order_by_name(self, name: str) -> dict | None:
         """
-        Надёжно: search + exact match по name.
+        Практически надёжно (и не ломается на спецсимволах):
+        search + exact match по name.
         """
         target = str(name).strip()
         if not target:
             return None
+
         res = self._get("/entity/customerorder", params={"search": target, "limit": 100})
         for r in (res.get("rows") or []):
             if str(r.get("name") or "").strip() == target:

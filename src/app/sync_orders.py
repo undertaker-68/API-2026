@@ -18,7 +18,7 @@ def iso_z(d: datetime) -> str:
 
 
 def compute_cutoff_window(since_date: str, days_back: int = 7, days_forward: int = 0) -> tuple[str, str]:
-    # окно: назад 7 дней, но не раньше since_date; вперед НЕ лезем
+    # окно: назад N дней, но не раньше since_date; вперед НЕ лезем
     since = date.fromisoformat(since_date)
     today = datetime.now(timezone.utc).date()
     start = max(since, today - timedelta(days=days_back))
@@ -29,18 +29,33 @@ def compute_cutoff_window(since_date: str, days_back: int = 7, days_forward: int
     )
 
 
-def build_ms_positions(ms: MSClient, ozon_products: list[dict]) -> list[dict]:
+def build_ms_positions(ms: MSClient, ozon_products: list[dict], posting_number: str) -> list[dict]:
+    """
+    ВАЖНО: не скипаем заказ целиком, если какая-то позиция не сматчилась.
+    Просто пропускаем эту позицию и логируем.
+    """
     positions: list[dict] = []
     for p in ozon_products:
         offer_id = str(p.get("offer_id") or "").strip()
         qty = int(p.get("quantity") or 0)
         if not offer_id or qty <= 0:
             continue
-        positions.extend(expand_offer(ms, offer_id, qty))
+
+        expanded = expand_offer(ms, offer_id, qty)
+        if not expanded:
+            log.warning("MS product not mapped: posting=%s offer_id=%s qty=%s -> SKIP POSITION", posting_number, offer_id, qty)
+            continue
+
+        positions.extend(expanded)
+
     return positions
 
 
 def ensure_order(ms: MSClient, posting_number: str) -> tuple[str | None, str]:
+    """
+    1) Если заказ с name=posting_number есть и это наш Ozon (по description) — возвращаем id и пропускаем создание.
+    2) Если name совпал, но не наш Ozon — создаём с постфиксом er/er2...
+    """
     found = ms.find_customer_order_by_name(posting_number)
     if found:
         oid = found["id"]
@@ -88,27 +103,27 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
             try:
                 full = ozon.get_posting(posting_number)
                 posting = full.get("result") or full
+
                 oz_status = posting.get("status")
                 cancellation = posting.get("cancellation") or {}
                 initiator = cancellation.get("initiator")
 
-                log.info("OZON posting=%s status=%s initiator=%s", posting_number, oz_status, initiator)
+                log.info("sync OZON posting=%s status=%s initiator=%s", posting_number, oz_status, initiator)
 
                 ms_state_id = ms_state_id_for_ozon_status(oz_status, initiator)
                 order_id = s.ms_order_id
 
-                # --- СОЗДАНИЕ ЗАКАЗА: на awaiting_packaging/awaiting_deliver/delivering
+                # --- СОЗДАНИЕ ЗАКАЗА: на awaiting_packaging/awaiting_deliver/delivering (если впервые видим)
                 if not order_id and oz_status in ("awaiting_packaging", "awaiting_deliver", "delivering"):
                     existing_id, name = ensure_order(ms, posting_number)
                     if existing_id:
                         order_id = existing_id
+                        log.info("MS CustomerOrder exists posting=%s id=%s -> SKIP CREATE", posting_number, order_id)
                     else:
-                        positions = build_ms_positions(ms, posting.get("products") or [])
+                        positions = build_ms_positions(ms, posting.get("products") or [], posting_number)
                         if not positions:
-                            log.warning(
-                                "MS skip create CustomerOrder posting=%s: no positions (products not mapped)",
-                                posting_number,
-                            )
+                            # нет ни одной сматченной позиции — тут действительно нечего создавать
+                            log.warning("MS skip create CustomerOrder posting=%s: NO MAPPED POSITIONS -> FORGET", posting_number)
                             store.upsert(
                                 OrderState(posting_number, None, oz_status, s.demand_created, s.move_created, 1, now_ts, 0)
                             )
@@ -139,11 +154,12 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                 # --- Demand (защита от дублей)
                 if oz_status == "delivering":
                     if s.demand_created:
+                        log.info("MS Demand already created posting=%s -> FORGET", posting_number)
                         s.forgotten = 1
                     else:
-                        positions = build_ms_positions(ms, posting.get("products") or [])
+                        positions = build_ms_positions(ms, posting.get("products") or [], posting_number)
                         if not positions:
-                            log.warning("MS skip create Demand posting=%s: no positions", posting_number)
+                            log.warning("MS skip create Demand posting=%s: no mapped positions -> FORGET", posting_number)
                             s.demand_created = 1
                             s.forgotten = 1
                         else:
@@ -195,10 +211,7 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                 if (initiator or "").upper() == "SELLER":
                     action = "reserve_off+move"
 
-                log.info(
-                    "CANCEL posting=%s prev=%s initiator=%s action=%s",
-                    st.posting_number, st.last_status, initiator, action
-                )
+                log.info("CANCEL posting=%s prev=%s initiator=%s action=%s", st.posting_number, st.last_status, initiator, action)
 
                 if st.ms_order_id and not cfg.dry_run:
                     ms_state_id = ms_state_id_for_ozon_status("cancelled", initiator)
@@ -208,7 +221,7 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                     ms.set_order_reserve(st.ms_order_id, False)
 
                     if (initiator or "").upper() == "SELLER" and not st.move_created:
-                        positions = build_ms_positions(ms, posting.get("products") or [])
+                        positions = build_ms_positions(ms, posting.get("products") or [], st.posting_number)
                         try:
                             if positions:
                                 ms.create_move({
