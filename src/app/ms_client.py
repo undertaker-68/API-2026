@@ -60,7 +60,7 @@ class MSClient:
         return self._request("PUT", path, body=body)
 
     # ---------------------------
-    # Catalog: exact by article
+    # Helpers
     # ---------------------------
 
     @staticmethod
@@ -68,43 +68,102 @@ class MSClient:
         rows = res.get("rows") or []
         return rows[0] if rows else None
 
-    def find_bundle_by_article_exact(self, article: str) -> dict | None:
-        a = str(article).strip()
-        if not a:
-            return None
-        res = self._get("/entity/bundle", params={"filter": f"article={a}", "limit": 1})
-        return self._first_row(res)
+    @staticmethod
+    def _normalize_article(s: str) -> str:
+        """
+        Нормализация артикулов:
+        - разные тире -> "-"
+        - кириллические "похожие" буквы -> латиница (АВЕКМНОРСТХУ, а/е/о/р/с/у/х/к/м/т/н/в)
+        """
+        if s is None:
+            return ""
+        s = str(s).strip()
+        if not s:
+            return ""
 
-    def find_product_by_article_exact(self, article: str) -> dict | None:
-        a = str(article).strip()
-        if not a:
-            return None
-        res = self._get("/entity/product", params={"filter": f"article={a}", "limit": 1})
-        return self._first_row(res)
+        # normalize dashes
+        s = s.replace("–", "-").replace("—", "-").replace("−", "-").replace("-", "-")
 
-    def find_variant_by_article_exact(self, article: str) -> dict | None:
-        a = str(article).strip()
-        if not a:
-            return None
-        res = self._get("/entity/variant", params={"filter": f"article={a}", "limit": 1})
-        return self._first_row(res)
+        # Cyrillic-to-Latin lookalikes (upper + lower)
+        repl = {
+            "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P",
+            "С": "C", "Т": "T", "Х": "X", "У": "Y",
+            "а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p",
+            "с": "c", "т": "t", "х": "x", "у": "y",
+        }
+        s2 = "".join(repl.get(ch, ch) for ch in s)
+        return s2
+
+    def _article_variants(self, article: str) -> list[str]:
+        a0 = str(article).strip()
+        a1 = self._normalize_article(a0)
+        variants = []
+        for x in (a0, a1):
+            x = (x or "").strip()
+            if x and x not in variants:
+                variants.append(x)
+        return variants
 
     # ---------------------------
-    # Catalog: fallback assortment search + exact article
+    # Assortment (best entry point)
     # ---------------------------
+
+    def find_assortment_by_article_filter_exact(self, article: str) -> dict | None:
+        """
+        Самый правильный поиск: /entity/assortment?filter=article=<article>
+        """
+        for a in self._article_variants(article):
+            res = self._get("/entity/assortment", params={"filter": f"article={a}", "limit": 1})
+            row = self._first_row(res)
+            if row:
+                return row
+        return None
 
     def find_assortment_by_article_search_exact(self, article: str) -> dict | None:
         """
-        Надёжно в реальной жизни: /entity/assortment?search=... + exact match по article.
+        Fallback: /entity/assortment?search=... + exact match по article.
         """
-        target = str(article).strip()
-        if not target:
-            return None
+        for target in self._article_variants(article):
+            res = self._get("/entity/assortment", params={"search": target, "limit": 100})
+            for r in (res.get("rows") or []):
+                if str(r.get("article") or "").strip() == target:
+                    return r
+        return None
 
-        res = self._get("/entity/assortment", params={"search": target, "limit": 100})
-        for r in (res.get("rows") or []):
-            if str(r.get("article") or "").strip() == target:
-                return r
+    def find_assortment_by_article(self, article: str) -> dict | None:
+        # 1) exact filter, 2) fallback search+exact
+        r = self.find_assortment_by_article_filter_exact(article)
+        if r:
+            return r
+        return self.find_assortment_by_article_search_exact(article)
+
+    # ---------------------------
+    # Bundle / Product / Variant exact by article
+    # (полезно, но лучше входить через assortment)
+    # ---------------------------
+
+    def find_bundle_by_article_exact(self, article: str) -> dict | None:
+        for a in self._article_variants(article):
+            res = self._get("/entity/bundle", params={"filter": f"article={a}", "limit": 1})
+            row = self._first_row(res)
+            if row:
+                return row
+        return None
+
+    def find_product_by_article_exact(self, article: str) -> dict | None:
+        for a in self._article_variants(article):
+            res = self._get("/entity/product", params={"filter": f"article={a}", "limit": 1})
+            row = self._first_row(res)
+            if row:
+                return row
+        return None
+
+    def find_variant_by_article_exact(self, article: str) -> dict | None:
+        for a in self._article_variants(article):
+            res = self._get("/entity/variant", params={"filter": f"article={a}", "limit": 1})
+            row = self._first_row(res)
+            if row:
+                return row
         return None
 
     def get_bundle_components(self, bundle_id: str) -> list[dict]:
@@ -114,7 +173,6 @@ class MSClient:
         return rows or []
 
     def get_by_meta_href(self, href: str) -> dict:
-        # meta.href полный URL — делаем GET напрямую
         r = requests.get(href, headers=self.headers, timeout=30)
         if r.status_code >= 400:
             log.error("MS GET meta href failed: %s %s", r.status_code, r.text)
@@ -123,10 +181,6 @@ class MSClient:
 
     @staticmethod
     def get_sale_price_value(entity: dict) -> int | None:
-        """
-        salePrices[].value — цена в копейках.
-        Берём первый уровень (MVP).
-        """
         prices = entity.get("salePrices") or []
         if not prices:
             return None
@@ -139,8 +193,7 @@ class MSClient:
 
     def find_customer_order_by_name(self, name: str) -> dict | None:
         """
-        Практически надёжно (и не ломается на спецсимволах):
-        search + exact match по name.
+        Надёжно: search + exact match по name.
         """
         target = str(name).strip()
         if not target:

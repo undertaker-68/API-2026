@@ -18,7 +18,6 @@ def iso_z(d: datetime) -> str:
 
 
 def compute_cutoff_window(since_date: str, days_back: int = 7, days_forward: int = 0) -> tuple[str, str]:
-    # окно: назад N дней, но не раньше since_date; вперед НЕ лезем
     since = date.fromisoformat(since_date)
     today = datetime.now(timezone.utc).date()
     start = max(since, today - timedelta(days=days_back))
@@ -31,8 +30,8 @@ def compute_cutoff_window(since_date: str, days_back: int = 7, days_forward: int
 
 def build_ms_positions(ms: MSClient, ozon_products: list[dict], posting_number: str) -> list[dict]:
     """
-    ВАЖНО: не скипаем заказ целиком, если какая-то позиция не сматчилась.
-    Просто пропускаем эту позицию и логируем.
+    Не скипаем заказ целиком из-за одной позиции.
+    Пропускаем позицию и логируем.
     """
     positions: list[dict] = []
     for p in ozon_products:
@@ -41,9 +40,13 @@ def build_ms_positions(ms: MSClient, ozon_products: list[dict], posting_number: 
         if not offer_id or qty <= 0:
             continue
 
+        # важно: normalize внутри MSClient/expand_offer тоже, но тут оставим “как есть”
         expanded = expand_offer(ms, offer_id, qty)
         if not expanded:
-            log.warning("MS product not mapped: posting=%s offer_id=%s qty=%s -> SKIP POSITION", posting_number, offer_id, qty)
+            log.warning(
+                "MS product not mapped: posting=%s offer_id=%s qty=%s -> SKIP POSITION",
+                posting_number, offer_id, qty
+            )
             continue
 
         positions.extend(expanded)
@@ -53,7 +56,7 @@ def build_ms_positions(ms: MSClient, ozon_products: list[dict], posting_number: 
 
 def ensure_order(ms: MSClient, posting_number: str) -> tuple[str | None, str]:
     """
-    1) Если заказ с name=posting_number есть и это наш Ozon (по description) — возвращаем id и пропускаем создание.
+    1) Если заказ с name=posting_number есть и это наш Ozon (по description) — пропускаем создание.
     2) Если name совпал, но не наш Ozon — создаём с постфиксом er/er2...
     """
     found = ms.find_customer_order_by_name(posting_number)
@@ -90,6 +93,8 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
             continue
 
         postings = resp.get("result", {}).get("postings") or []
+        log.info("OZON list status=%s postings=%d", status, len(postings))
+
         for it in postings:
             posting_number = it.get("posting_number")
             if not posting_number:
@@ -122,11 +127,9 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                     else:
                         positions = build_ms_positions(ms, posting.get("products") or [], posting_number)
                         if not positions:
-                            # нет ни одной сматченной позиции — тут действительно нечего создавать
-                            log.warning("MS skip create CustomerOrder posting=%s: NO MAPPED POSITIONS -> FORGET", posting_number)
-                            store.upsert(
-                                OrderState(posting_number, None, oz_status, s.demand_created, s.move_created, 1, now_ts, 0)
-                            )
+                            log.warning("MS skip create CustomerOrder posting=%s: NO MAPPED POSITIONS", posting_number)
+                            # не забываем навсегда: может появиться товар/артикул позже
+                            store.upsert(OrderState(posting_number, None, oz_status, s.demand_created, s.move_created, 0, now_ts, 0))
                             continue
 
                         if not cfg.dry_run:
