@@ -12,11 +12,13 @@ from app.sync_orders import run_once
 
 log = logging.getLogger("main")
 
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--once", action="store_true")
     p.add_argument("--since", default="2026-01-28")
     return p.parse_args()
+
 
 def main():
     load_dotenv()
@@ -41,6 +43,7 @@ def main():
         except Exception as e:
             log.exception("sync loop error: %s", e)
         time.sleep(cfg.poll_seconds)
+
 
 if __name__ == "__main__":
     main()

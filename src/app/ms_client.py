@@ -1,8 +1,9 @@
 import logging
-from typing import Optional, Any
+from typing import Optional
 
 import requests
 
+from app.config import Config
 
 log = logging.getLogger("ms")
 
@@ -15,11 +16,24 @@ class MSClient:
       - filter на строки с дефисами часто валится 400 -> используем search + exact match
     """
 
-    def __init__(self, token: str, base: str = "https://api.moysklad.ru/api/remap/1.2"):
-        self.base = base.rstrip("/")
-        self.token = token.strip()
+    def __init__(self, cfg_or_token: Config | str, base: str | None = None):
+        # Поддержка двух режимов:
+        # 1) MSClient(cfg)  <- как у тебя в main.py
+        # 2) MSClient(token, base=...)
+        if hasattr(cfg_or_token, "ms_token"):
+            cfg: Config = cfg_or_token  # type: ignore[assignment]
+            token = cfg.ms_token
+            base_url = cfg.ms_base_url
+        else:
+            token = str(cfg_or_token)
+            base_url = base or "https://api.moysklad.ru/api/remap/1.2"
 
-        # IMPORTANT: MS ругается если Accept не ровно такой
+        self.base = (base_url or "https://api.moysklad.ru/api/remap/1.2").rstrip("/")
+        self.token = (token or "").strip()
+
+        if not self.token:
+            raise ValueError("MS_TOKEN is empty")
+
         self.headers = {
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/json;charset=utf-8",
@@ -79,42 +93,17 @@ class MSClient:
     # Helpers
     # -----------------------------
     @staticmethod
-    def _looks_like_cyrillic_latin_mix(s: str) -> bool:
-        # быстрый детектор, чтобы лишний раз не плодить варианты
-        for ch in s:
-            if "А" <= ch <= "я":
-                return True
-        return False
-
-    @staticmethod
     def _swap_lookalike_letters(s: str) -> str:
         """
         Подмена визуально похожих кириллица<->латиница.
         Нужно для кейса 10264-А93 (кирилл А) vs 10264-A93 (лат A).
         """
-        # Cyrillic -> Latin
         c2l = {
-            "А": "A",
-            "В": "B",
-            "Е": "E",
-            "К": "K",
-            "М": "M",
-            "Н": "H",
-            "О": "O",
-            "Р": "P",
-            "С": "C",
-            "Т": "T",
-            "Х": "X",
-            "а": "a",
-            "е": "e",
-            "о": "o",
-            "р": "p",
-            "с": "c",
-            "у": "y",
-            "х": "x",
+            "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X",
+            "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x",
         }
-        # Latin -> Cyrillic
         l2c = {v: k for k, v in c2l.items()}
+
         out = []
         for ch in s:
             if ch in c2l:
@@ -131,7 +120,6 @@ class MSClient:
             return []
         variants = {article}
         variants.add(self._swap_lookalike_letters(article))
-        # иногда руками вводят "—" / "–" вместо "-"
         variants.add(article.replace("—", "-").replace("–", "-"))
         variants.add(self._swap_lookalike_letters(article.replace("—", "-").replace("–", "-")))
         return [v for v in variants if v]
@@ -140,10 +128,6 @@ class MSClient:
     # CustomerOrder
     # -----------------------------
     def find_customer_order_by_name(self, name: str) -> Optional[dict]:
-        """
-        Надёжно: search + exact match (name).
-        Возвращает {id, name, ...} из rows если найдено.
-        """
         target = str(name).strip()
         if not target:
             return None
@@ -165,7 +149,9 @@ class MSClient:
         return self._put(f"/entity/customerorder/{order_id}", body)
 
     def set_order_state(self, order_id: str, state_id: str) -> dict:
-        return self.update_customer_order(order_id, {"state": {"meta": {"href": f"{self.base}/entity/customerorder/metadata/states/{state_id}", "type": "state"}}})
+        return self.update_customer_order(order_id, {
+            "state": {"meta": {"href": f"{self.base}/entity/customerorder/metadata/states/{state_id}", "type": "state"}}
+        })
 
     def set_order_reserve(self, order_id: str, reserve: bool) -> dict:
         return self.update_customer_order(order_id, {"reserve": bool(reserve)})
@@ -183,13 +169,6 @@ class MSClient:
     # Assortment / Bundle lookup by article
     # -----------------------------
     def find_assortment_by_article_search_exact(self, article: str) -> Optional[dict]:
-        """
-        Главная функция сопоставления offer_id (Ozon) -> assortment (MS).
-        Делает:
-          - candidates по кирил/латинице
-          - для каждого candidate: GET /entity/assortment?search=...&limit=100
-          - exact match по полю article
-        """
         for cand in self._article_candidates(article):
             res = self._get("/entity/assortment", params={"search": cand, "limit": 100, "offset": 0})
             rows = res.get("rows") or []
@@ -199,13 +178,9 @@ class MSClient:
         return None
 
     def get_bundle(self, bundle_id: str) -> dict:
-        # expand components.assortment чтобы сразу получить meta
         return self._get(f"/entity/bundle/{bundle_id}", params={"expand": "components.assortment"})
 
     def try_get_bundle_by_article(self, article: str) -> Optional[dict]:
-        """
-        Если offer_id/article указывает на комплект — он может лежать в /entity/assortment как type=bundle.
-        """
         a = self.find_assortment_by_article_search_exact(article)
         if not a:
             return None
@@ -223,15 +198,11 @@ class MSClient:
     # -----------------------------
     @staticmethod
     def get_sale_price(entity: dict) -> Optional[int]:
-        """
-        Возвращает "Цена продажи" (sellPrice) из salePrices (если есть).
-        МС хранит в копейках (int).
-        """
         sale_prices = entity.get("salePrices") or []
         for p in sale_prices:
             price_type = (p.get("priceType") or {}).get("name") or ""
             if price_type.strip().lower() in ("цена продажи", "sale price", "sell price", "розничная"):
-                value = (p.get("value") or 0)
+                value = p.get("value") or 0
                 try:
                     return int(value)
                 except Exception:
