@@ -1,5 +1,7 @@
 import logging
 import requests
+from urllib.parse import quote
+
 from app.config import Config
 
 log = logging.getLogger("ms")
@@ -57,11 +59,44 @@ class MSClient:
     def _put(self, path: str, body: dict) -> dict:
         return self._request("PUT", path, body=body)
 
-    # --- Catalog (assortment-based)
+    # ---------------------------
+    # Catalog: exact by article
+    # ---------------------------
 
-    def find_assortment_by_article(self, article: str):
+    @staticmethod
+    def _first_row(res: dict) -> dict | None:
+        rows = res.get("rows") or []
+        return rows[0] if rows else None
+
+    def find_bundle_by_article_exact(self, article: str) -> dict | None:
+        a = str(article).strip()
+        if not a:
+            return None
+        # exact filter (часто работает быстрее/точнее чем search)
+        res = self._get("/entity/bundle", params={"filter": f"article={a}", "limit": 1})
+        return self._first_row(res)
+
+    def find_product_by_article_exact(self, article: str) -> dict | None:
+        a = str(article).strip()
+        if not a:
+            return None
+        res = self._get("/entity/product", params={"filter": f"article={a}", "limit": 1})
+        return self._first_row(res)
+
+    def find_variant_by_article_exact(self, article: str) -> dict | None:
+        a = str(article).strip()
+        if not a:
+            return None
+        res = self._get("/entity/variant", params={"filter": f"article={a}", "limit": 1})
+        return self._first_row(res)
+
+    # ---------------------------
+    # Catalog: fallback assortment search + exact article
+    # ---------------------------
+
+    def find_assortment_by_article_search_exact(self, article: str) -> dict | None:
         """
-        Надёжно: ищем по /entity/assortment?search=... и делаем exact match по article.
+        Надёжно: /entity/assortment?search=... и exact match по article.
         Возвращает row (product/bundle/variant).
         """
         target = str(article).strip()
@@ -75,35 +110,49 @@ class MSClient:
                 return r
         return None
 
-    def find_product_by_article(self, article: str):
-        row = self.find_assortment_by_article(article)
-        if not row:
-            return None
-        meta = (row.get("meta") or {})
-        return row if meta.get("type") == "product" else None
-
-    def find_bundle_by_article(self, article: str):
-        row = self.find_assortment_by_article(article)
-        if not row:
-            return None
-        meta = (row.get("meta") or {})
-        return row if meta.get("type") == "bundle" else None
-
     def get_bundle_components(self, bundle_id: str) -> list[dict]:
-        b = self._get(f"/entity/bundle/{bundle_id}")
-        return b.get("components") or []
+        """
+        Возвращает components.rows, где у каждого компонента есть:
+        - quantity
+        - assortment.meta (+ если expand, то assortment содержит поля)
+        """
+        b = self._get(f"/entity/bundle/{bundle_id}", params={"expand": "components.assortment"})
+        comps = b.get("components") or {}
+        rows = comps.get("rows") if isinstance(comps, dict) else None
+        return rows or []
 
-    def get_sale_price(self, product_or_bundle: dict) -> int | None:
-        prices = product_or_bundle.get("salePrices") or []
+    def get_by_meta_href(self, href: str) -> dict:
+        """
+        href приходит в meta.href (полный URL). Делаем GET напрямую.
+        """
+        try:
+            r = requests.get(href, headers=self.headers, timeout=30)
+            if r.status_code >= 400:
+                log.error("MS GET meta href failed: %s %s", r.status_code, r.text)
+                raise requests.HTTPError(f"{r.status_code} {r.text}", response=r)
+            return r.json()
+        except Exception:
+            raise
+
+    @staticmethod
+    def get_sale_price_value(entity: dict) -> int | None:
+        """
+        В МС salePrices[].value — цена в копейках.
+        Берём первый уровень цены (MVP).
+        """
+        prices = entity.get("salePrices") or []
         if not prices:
             return None
-        return prices[0].get("value")
+        v = prices[0].get("value")
+        return int(v) if v is not None else None
 
-    # --- Orders
+    # ---------------------------
+    # Orders
+    # ---------------------------
 
-    def find_customer_order_by_name(self, name: str):
+    def find_customer_order_by_name(self, name: str) -> dict | None:
         """
-        Надёжно: search + exact match по name (filter=name часто ломается).
+        Надёжно: search + exact match по name.
         """
         target = str(name).strip()
         if not target:
