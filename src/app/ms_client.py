@@ -1,25 +1,41 @@
 import logging
+from typing import Optional, Any
+
 import requests
 
-from app.config import Config
 
 log = logging.getLogger("ms")
 
 
 class MSClient:
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
-        self.base = cfg.ms_base_url.rstrip("/")
+    """
+    Минимальный клиент МойСклад REMAP 1.2
+    ВАЖНО:
+      - Accept должен быть строго application/json;charset=utf-8 (иначе 1062)
+      - filter на строки с дефисами часто валится 400 -> используем search + exact match
+    """
 
-        # MoySklad строго требует Accept = application/json;charset=utf-8
+    def __init__(self, token: str, base: str = "https://api.moysklad.ru/api/remap/1.2"):
+        self.base = base.rstrip("/")
+        self.token = token.strip()
+
+        # IMPORTANT: MS ругается если Accept не ровно такой
         self.headers = {
-            "Authorization": f"Bearer {cfg.ms_token}",
+            "Authorization": f"Bearer {self.token}",
             "Accept": "application/json;charset=utf-8",
-            "Content-Type": "application/json;charset=utf-8",
+            "Content-Type": "application/json",
         }
 
-    # --- low-level http with error body logging
-    def _request(self, method: str, path: str, params: dict | None = None, body: dict | None = None) -> dict:
+    # -----------------------------
+    # Low-level http
+    # -----------------------------
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict | None = None,
+        body: dict | None = None,
+    ) -> dict:
         url = f"{self.base}{path}"
         try:
             r = requests.request(
@@ -59,150 +75,84 @@ class MSClient:
     def _put(self, path: str, body: dict) -> dict:
         return self._request("PUT", path, body=body)
 
-    # ---------------------------
+    # -----------------------------
     # Helpers
-    # ---------------------------
+    # -----------------------------
+    @staticmethod
+    def _looks_like_cyrillic_latin_mix(s: str) -> bool:
+        # быстрый детектор, чтобы лишний раз не плодить варианты
+        for ch in s:
+            if "А" <= ch <= "я":
+                return True
+        return False
 
     @staticmethod
-    def _first_row(res: dict) -> dict | None:
-        rows = res.get("rows") or []
-        return rows[0] if rows else None
-
-    @staticmethod
-    def _normalize_article(s: str) -> str:
+    def _swap_lookalike_letters(s: str) -> str:
         """
-        Нормализация артикулов:
-        - разные тире -> "-"
-        - кириллические "похожие" буквы -> латиница (АВЕКМНОРСТХУ, а/е/о/р/с/у/х/к/м/т/н/в)
+        Подмена визуально похожих кириллица<->латиница.
+        Нужно для кейса 10264-А93 (кирилл А) vs 10264-A93 (лат A).
         """
-        if s is None:
-            return ""
-        s = str(s).strip()
-        if not s:
-            return ""
-
-        # normalize dashes
-        s = s.replace("–", "-").replace("—", "-").replace("−", "-").replace("-", "-")
-
-        # Cyrillic-to-Latin lookalikes (upper + lower)
-        repl = {
-            "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P",
-            "С": "C", "Т": "T", "Х": "X", "У": "Y",
-            "а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p",
-            "с": "c", "т": "t", "х": "x", "у": "y",
+        # Cyrillic -> Latin
+        c2l = {
+            "А": "A",
+            "В": "B",
+            "Е": "E",
+            "К": "K",
+            "М": "M",
+            "Н": "H",
+            "О": "O",
+            "Р": "P",
+            "С": "C",
+            "Т": "T",
+            "Х": "X",
+            "а": "a",
+            "е": "e",
+            "о": "o",
+            "р": "p",
+            "с": "c",
+            "у": "y",
+            "х": "x",
         }
-        s2 = "".join(repl.get(ch, ch) for ch in s)
-        return s2
+        # Latin -> Cyrillic
+        l2c = {v: k for k, v in c2l.items()}
+        out = []
+        for ch in s:
+            if ch in c2l:
+                out.append(c2l[ch])
+            elif ch in l2c:
+                out.append(l2c[ch])
+            else:
+                out.append(ch)
+        return "".join(out)
 
-    def _article_variants(self, article: str) -> list[str]:
-        a0 = str(article).strip()
-        a1 = self._normalize_article(a0)
-        variants = []
-        for x in (a0, a1):
-            x = (x or "").strip()
-            if x and x not in variants:
-                variants.append(x)
-        return variants
+    def _article_candidates(self, article: str) -> list[str]:
+        article = (article or "").strip()
+        if not article:
+            return []
+        variants = {article}
+        variants.add(self._swap_lookalike_letters(article))
+        # иногда руками вводят "—" / "–" вместо "-"
+        variants.add(article.replace("—", "-").replace("–", "-"))
+        variants.add(self._swap_lookalike_letters(article.replace("—", "-").replace("–", "-")))
+        return [v for v in variants if v]
 
-    # ---------------------------
-    # Assortment (best entry point)
-    # ---------------------------
-
-    def find_assortment_by_article_filter_exact(self, article: str) -> dict | None:
+    # -----------------------------
+    # CustomerOrder
+    # -----------------------------
+    def find_customer_order_by_name(self, name: str) -> Optional[dict]:
         """
-        Самый правильный поиск: /entity/assortment?filter=article=<article>
-        """
-        for a in self._article_variants(article):
-            res = self._get("/entity/assortment", params={"filter": f"article={a}", "limit": 1})
-            row = self._first_row(res)
-            if row:
-                return row
-        return None
-
-    def find_assortment_by_article_search_exact(self, article: str) -> dict | None:
-        """
-        Fallback: /entity/assortment?search=... + exact match по article.
-        """
-        for target in self._article_variants(article):
-            res = self._get("/entity/assortment", params={"search": target, "limit": 100})
-            for r in (res.get("rows") or []):
-                if str(r.get("article") or "").strip() == target:
-                    return r
-        return None
-
-    def find_assortment_by_article(self, article: str) -> dict | None:
-        # 1) exact filter, 2) fallback search+exact
-        r = self.find_assortment_by_article_filter_exact(article)
-        if r:
-            return r
-        return self.find_assortment_by_article_search_exact(article)
-
-    # ---------------------------
-    # Bundle / Product / Variant exact by article
-    # (полезно, но лучше входить через assortment)
-    # ---------------------------
-
-    def find_bundle_by_article_exact(self, article: str) -> dict | None:
-        for a in self._article_variants(article):
-            res = self._get("/entity/bundle", params={"filter": f"article={a}", "limit": 1})
-            row = self._first_row(res)
-            if row:
-                return row
-        return None
-
-    def find_product_by_article_exact(self, article: str) -> dict | None:
-        for a in self._article_variants(article):
-            res = self._get("/entity/product", params={"filter": f"article={a}", "limit": 1})
-            row = self._first_row(res)
-            if row:
-                return row
-        return None
-
-    def find_variant_by_article_exact(self, article: str) -> dict | None:
-        for a in self._article_variants(article):
-            res = self._get("/entity/variant", params={"filter": f"article={a}", "limit": 1})
-            row = self._first_row(res)
-            if row:
-                return row
-        return None
-
-    def get_bundle_components(self, bundle_id: str) -> list[dict]:
-        b = self._get(f"/entity/bundle/{bundle_id}", params={"expand": "components.assortment"})
-        comps = b.get("components") or {}
-        rows = comps.get("rows") if isinstance(comps, dict) else None
-        return rows or []
-
-    def get_by_meta_href(self, href: str) -> dict:
-        r = requests.get(href, headers=self.headers, timeout=30)
-        if r.status_code >= 400:
-            log.error("MS GET meta href failed: %s %s", r.status_code, r.text)
-            raise requests.HTTPError(f"{r.status_code} {r.text}", response=r)
-        return r.json()
-
-    @staticmethod
-    def get_sale_price_value(entity: dict) -> int | None:
-        prices = entity.get("salePrices") or []
-        if not prices:
-            return None
-        v = prices[0].get("value")
-        return int(v) if v is not None else None
-
-    # ---------------------------
-    # Orders
-    # ---------------------------
-
-    def find_customer_order_by_name(self, name: str) -> dict | None:
-        """
-        Надёжно: search + exact match по name.
+        Надёжно: search + exact match (name).
+        Возвращает {id, name, ...} из rows если найдено.
         """
         target = str(name).strip()
         if not target:
             return None
 
-        res = self._get("/entity/customerorder", params={"search": target, "limit": 100})
-        for r in (res.get("rows") or []):
-            if str(r.get("name") or "").strip() == target:
-                return {"id": r.get("id")}
+        res = self._get("/entity/customerorder", params={"search": target, "limit": 100, "offset": 0})
+        rows = res.get("rows") or []
+        for r in rows:
+            if (r.get("name") or "").strip() == target:
+                return r
         return None
 
     def get_customer_order(self, order_id: str) -> dict:
@@ -214,26 +164,76 @@ class MSClient:
     def update_customer_order(self, order_id: str, body: dict) -> dict:
         return self._put(f"/entity/customerorder/{order_id}", body)
 
-    def set_order_state(self, order_id: str, state_id: str) -> None:
-        self._put(
-            f"/entity/customerorder/{order_id}",
-            {
-                "state": {
-                    "meta": {
-                        "href": f"{self.base}/entity/customerorder/metadata/states/{state_id}",
-                        "type": "state",
-                        "mediaType": "application/json",
-                    }
-                }
-            },
-        )
+    def set_order_state(self, order_id: str, state_id: str) -> dict:
+        return self.update_customer_order(order_id, {"state": {"meta": {"href": f"{self.base}/entity/customerorder/metadata/states/{state_id}", "type": "state"}}})
 
-    def set_order_reserve(self, order_id: str, reserve: bool) -> None:
-        self._put(f"/entity/customerorder/{order_id}", {"reserve": reserve})
+    def set_order_reserve(self, order_id: str, reserve: bool) -> dict:
+        return self.update_customer_order(order_id, {"reserve": bool(reserve)})
 
-    # --- Demand / Move
+    # -----------------------------
+    # Demand / Move
+    # -----------------------------
     def create_demand(self, body: dict) -> dict:
         return self._post("/entity/demand", body)
 
     def create_move(self, body: dict) -> dict:
         return self._post("/entity/move", body)
+
+    # -----------------------------
+    # Assortment / Bundle lookup by article
+    # -----------------------------
+    def find_assortment_by_article_search_exact(self, article: str) -> Optional[dict]:
+        """
+        Главная функция сопоставления offer_id (Ozon) -> assortment (MS).
+        Делает:
+          - candidates по кирил/латинице
+          - для каждого candidate: GET /entity/assortment?search=...&limit=100
+          - exact match по полю article
+        """
+        for cand in self._article_candidates(article):
+            res = self._get("/entity/assortment", params={"search": cand, "limit": 100, "offset": 0})
+            rows = res.get("rows") or []
+            for r in rows:
+                if (r.get("article") or "").strip() == cand:
+                    return r
+        return None
+
+    def get_bundle(self, bundle_id: str) -> dict:
+        # expand components.assortment чтобы сразу получить meta
+        return self._get(f"/entity/bundle/{bundle_id}", params={"expand": "components.assortment"})
+
+    def try_get_bundle_by_article(self, article: str) -> Optional[dict]:
+        """
+        Если offer_id/article указывает на комплект — он может лежать в /entity/assortment как type=bundle.
+        """
+        a = self.find_assortment_by_article_search_exact(article)
+        if not a:
+            return None
+        meta = (a.get("meta") or {})
+        if meta.get("type") != "bundle":
+            return None
+        href = meta.get("href") or ""
+        bundle_id = href.rstrip("/").split("/")[-1]
+        if not bundle_id:
+            return None
+        return self.get_bundle(bundle_id)
+
+    # -----------------------------
+    # Prices
+    # -----------------------------
+    @staticmethod
+    def get_sale_price(entity: dict) -> Optional[int]:
+        """
+        Возвращает "Цена продажи" (sellPrice) из salePrices (если есть).
+        МС хранит в копейках (int).
+        """
+        sale_prices = entity.get("salePrices") or []
+        for p in sale_prices:
+            price_type = (p.get("priceType") or {}).get("name") or ""
+            if price_type.strip().lower() in ("цена продажи", "sale price", "sell price", "розничная"):
+                value = (p.get("value") or 0)
+                try:
+                    return int(value)
+                except Exception:
+                    return None
+        return None

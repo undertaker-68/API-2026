@@ -10,7 +10,7 @@ from app.bundle_expand import expand_offer
 
 log = logging.getLogger("sync")
 
-OZON_MARK = "ozon"
+OZON_MARK = "ozon"  # метка в description
 
 
 def iso_z(d: datetime) -> str:
@@ -30,8 +30,10 @@ def compute_cutoff_window(since_date: str, days_back: int = 7, days_forward: int
 
 def build_ms_positions(ms: MSClient, ozon_products: list[dict], posting_number: str) -> list[dict]:
     """
-    Не скипаем заказ целиком из-за одной позиции.
-    Пропускаем позицию и логируем.
+    ВАЖНО:
+      - сопоставление offer_id -> article (МС)
+      - bundle разворачиваем
+      - если позиция не сматчилась — пропускаем позицию, заказ НЕ дропаем целиком
     """
     positions: list[dict] = []
     for p in ozon_products:
@@ -40,13 +42,9 @@ def build_ms_positions(ms: MSClient, ozon_products: list[dict], posting_number: 
         if not offer_id or qty <= 0:
             continue
 
-        # важно: normalize внутри MSClient/expand_offer тоже, но тут оставим “как есть”
         expanded = expand_offer(ms, offer_id, qty)
         if not expanded:
-            log.warning(
-                "MS product not mapped: posting=%s offer_id=%s qty=%s -> SKIP POSITION",
-                posting_number, offer_id, qty
-            )
+            log.warning("MS product not mapped: posting=%s offer_id=%s qty=%s -> SKIP POSITION", posting_number, offer_id, qty)
             continue
 
         positions.extend(expanded)
@@ -56,8 +54,8 @@ def build_ms_positions(ms: MSClient, ozon_products: list[dict], posting_number: 
 
 def ensure_order(ms: MSClient, posting_number: str) -> tuple[str | None, str]:
     """
-    1) Если заказ с name=posting_number есть и это наш Ozon (по description) — пропускаем создание.
-    2) Если name совпал, но не наш Ozon — создаём с постфиксом er/er2...
+    1) Если заказ с name=posting_number есть и это НАШ Ozon (по description) — возвращаем id и creation skip.
+    2) Если name совпал, но это не наш Ozon — создаём с постфиксом er/er2/...
     """
     found = ms.find_customer_order_by_name(posting_number)
     if found:
@@ -81,19 +79,19 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
     now_ts = int(datetime.now(timezone.utc).timestamp())
     seen_now: set[str] = set()
 
-    cutoff_from, cutoff_to = compute_cutoff_window(since_date)
-    log.info("CUT window %s .. %s", cutoff_from, cutoff_to)
+    cutoff_from, cutoff_to = compute_cutoff_window(since_date, days_back=7, days_forward=0)
+    log.info("sync CUT window %s .. %s", cutoff_from, cutoff_to)
 
     # ===== АКТИВНЫЕ СТАТУСЫ =====
     for status in ("awaiting_packaging", "awaiting_deliver", "delivering"):
         try:
             resp = ozon.unfulfilled_list(cutoff_from, cutoff_to, status=status, limit=50, offset=0)
         except Exception as e:
-            log.error("OZON list status=%s failed: %s", status, e)
+            log.error("sync OZON list status=%s failed: %s", status, e)
             continue
 
         postings = resp.get("result", {}).get("postings") or []
-        log.info("OZON list status=%s postings=%d", status, len(postings))
+        log.info("sync OZON list status=%s postings=%d", status, len(postings))
 
         for it in postings:
             posting_number = it.get("posting_number")
@@ -108,8 +106,7 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
             try:
                 full = ozon.get_posting(posting_number)
                 posting = full.get("result") or full
-
-                oz_status = posting.get("status")
+                oz_status = posting.get("status") or status
                 cancellation = posting.get("cancellation") or {}
                 initiator = cancellation.get("initiator")
 
@@ -118,17 +115,18 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                 ms_state_id = ms_state_id_for_ozon_status(oz_status, initiator)
                 order_id = s.ms_order_id
 
-                # --- СОЗДАНИЕ ЗАКАЗА: на awaiting_packaging/awaiting_deliver/delivering (если впервые видим)
+                # --- создание заказа (если его нет) — для awaiting_* и даже delivering (бывают кейсы)
                 if not order_id and oz_status in ("awaiting_packaging", "awaiting_deliver", "delivering"):
                     existing_id, name = ensure_order(ms, posting_number)
                     if existing_id:
                         order_id = existing_id
-                        log.info("MS CustomerOrder exists posting=%s id=%s -> SKIP CREATE", posting_number, order_id)
                     else:
                         positions = build_ms_positions(ms, posting.get("products") or [], posting_number)
+
+                        # если вообще ничего не сматчилось — НЕ забываем (чтобы добить после починки артикула),
+                        # просто не создаём пустой заказ.
                         if not positions:
-                            log.warning("MS skip create CustomerOrder posting=%s: NO MAPPED POSITIONS", posting_number)
-                            # не забываем навсегда: может появиться товар/артикул позже
+                            log.warning("MS skip create CustomerOrder posting=%s: positions=0 (all products unmapped)", posting_number)
                             store.upsert(OrderState(posting_number, None, oz_status, s.demand_created, s.move_created, 0, now_ts, 0))
                             continue
 
@@ -154,32 +152,32 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                 if ms_state_id and not cfg.dry_run:
                     ms.set_order_state(order_id, ms_state_id)
 
-                # --- Demand (защита от дублей)
-                if oz_status == "delivering":
-                    if s.demand_created:
-                        log.info("MS Demand already created posting=%s -> FORGET", posting_number)
-                        s.forgotten = 1
+                # --- Demand (защита от дублей): создаём один раз при delivering
+                if oz_status == "delivering" and not s.demand_created:
+                    positions = build_ms_positions(ms, posting.get("products") or [], posting_number)
+
+                    # если не удалось собрать позиции — считаем ошибкой сопоставления, не создаём Demand и не забываем
+                    if not positions:
+                        log.warning("MS skip create Demand posting=%s: positions=0 (unmapped) -> will retry", posting_number)
                     else:
-                        positions = build_ms_positions(ms, posting.get("products") or [], posting_number)
-                        if not positions:
-                            log.warning("MS skip create Demand posting=%s: no mapped positions -> FORGET", posting_number)
-                            s.demand_created = 1
-                            s.forgotten = 1
-                        else:
-                            if not cfg.dry_run:
-                                try:
-                                    ms.create_demand({
-                                        "organization": {"meta": {"href": f"{ms.base}/entity/organization/{cfg.org_id}", "type": "organization"}},
-                                        "agent": {"meta": {"href": f"{ms.base}/entity/counterparty/{cfg.agent_id}", "type": "counterparty"}},
-                                        "store": {"meta": {"href": f"{ms.base}/entity/store/{cfg.store_ozon_id}", "type": "store"}},
-                                        "customerOrder": {"meta": {"href": f"{ms.base}/entity/customerorder/{order_id}", "type": "customerorder"}},
-                                        "positions": positions,
-                                    })
-                                    log.info("MS create Demand posting=%s order_id=%s -> FORGET", posting_number, order_id)
-                                except Exception as e:
-                                    log.error("MS create Demand failed posting=%s: %s -> FORGET", posting_number, e)
-                            s.demand_created = 1
-                            s.forgotten = 1
+                        if not cfg.dry_run:
+                            try:
+                                ms.create_demand({
+                                    "organization": {"meta": {"href": f"{ms.base}/entity/organization/{cfg.org_id}", "type": "organization"}},
+                                    "agent": {"meta": {"href": f"{ms.base}/entity/counterparty/{cfg.agent_id}", "type": "counterparty"}},
+                                    "store": {"meta": {"href": f"{ms.base}/entity/store/{cfg.store_ozon_id}", "type": "store"}},
+                                    "customerOrder": {"meta": {"href": f"{ms.base}/entity/customerorder/{order_id}", "type": "customerorder"}},
+                                    "positions": positions,
+                                })
+                                log.info("MS create Demand posting=%s order_id=%s -> demand_created=1", posting_number, order_id)
+                            except Exception as e:
+                                log.error("MS create Demand failed posting=%s: %s", posting_number, e)
+                                # не помечаем demand_created, пусть повторит
+                                store.upsert(OrderState(posting_number, order_id, oz_status, 0, s.move_created, 0, now_ts, 0))
+                                continue
+
+                        s.demand_created = 1
+                        s.forgotten = 1  # по твоему правилу: delivering->(создали demand)->забываем
 
                 store.upsert(OrderState(
                     posting_number, order_id, oz_status,
@@ -201,64 +199,76 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
             store.upsert(st)
             continue
 
-        log.info("FINALIZE posting=%s was_missing cycles=%s -> get()", st.posting_number, st.missed_cycles)
+        log.info("FINALIZE posting=%s was_missing cycles=%s -> ozon.get()", st.posting_number, st.missed_cycles)
 
         try:
             full = ozon.get_posting(st.posting_number)
             posting = full.get("result") or full
             oz_status = posting.get("status")
-            initiator = (posting.get("cancellation") or {}).get("initiator")
+            cancellation = posting.get("cancellation") or {}
+            initiator = cancellation.get("initiator")
 
+            ms_state_id = ms_state_id_for_ozon_status(oz_status, initiator)
+            order_id = st.ms_order_id
+
+            if not order_id:
+                # если у нас нет id заказа — просто забываем состояние, смысла нет
+                st.forgotten = 1
+                store.upsert(st)
+                continue
+
+            # обновим статус в МС (если нужно)
+            if ms_state_id and not cfg.dry_run:
+                ms.set_order_state(order_id, ms_state_id)
+
+            # отмены после delivering/delivered: не удаляем demand, просто забываем
             if oz_status == "cancelled":
-                action = "reserve_off"
-                if (initiator or "").upper() == "SELLER":
-                    action = "reserve_off+move"
+                # CLIENT/OZON: снять резерв и забыть
+                if initiator in ("client", "ozon"):
+                    if not cfg.dry_run:
+                        ms.set_order_reserve(order_id, False)
+                    st.forgotten = 1
+                    store.upsert(st)
+                    continue
 
-                log.info("CANCEL posting=%s prev=%s initiator=%s action=%s", st.posting_number, st.last_status, initiator, action)
+                # SELLER: если отменили из awaiting_deliver — снять резерв и сделать Move (если не делали)
+                if initiator == "seller":
+                    if not cfg.dry_run:
+                        ms.set_order_reserve(order_id, False)
 
-                if st.ms_order_id and not cfg.dry_run:
-                    ms_state_id = ms_state_id_for_ozon_status("cancelled", initiator)
-                    if ms_state_id:
-                        ms.set_order_state(st.ms_order_id, ms_state_id)
-
-                    ms.set_order_reserve(st.ms_order_id, False)
-
-                    if (initiator or "").upper() == "SELLER" and not st.move_created:
+                    if not st.move_created:
                         positions = build_ms_positions(ms, posting.get("products") or [], st.posting_number)
-                        try:
-                            if positions:
-                                ms.create_move({
-                                    "organization": {"meta": {"href": f"{ms.base}/entity/organization/{cfg.org_id}", "type": "organization"}},
-                                    "sourceStore": {"meta": {"href": f"{ms.base}/entity/store/{cfg.store_ozon_id}", "type": "store"}},
-                                    "targetStore": {"meta": {"href": f"{ms.base}/entity/store/{cfg.store_main_id}", "type": "store"}},
-                                    "positions": positions,
-                                })
+                        if positions:
+                            try:
+                                if not cfg.dry_run:
+                                    ms.create_move({
+                                        "organization": {"meta": {"href": f"{ms.base}/entity/organization/{cfg.org_id}", "type": "organization"}},
+                                        "sourceStore": {"meta": {"href": f"{ms.base}/entity/store/{cfg.store_ozon_id}", "type": "store"}},
+                                        "targetStore": {"meta": {"href": f"{ms.base}/entity/store/{cfg.store_main_id}", "type": "store"}},
+                                        "positions": positions,
+                                    })
                                 st.move_created = 1
-                        except Exception as e:
-                            log.error("MS create Move failed posting=%s: %s (skip)", st.posting_number, e)
+                                log.info("MS create Move posting=%s -> move_created=1", st.posting_number)
+                            except Exception as e:
+                                log.error("MS create Move failed posting=%s: %s (skip)", st.posting_number, e)
 
-                log.info("FORGET posting=%s reason=cancelled", st.posting_number)
+                    st.forgotten = 1
+                    store.upsert(st)
+                    continue
+
+            # доставлен/отгружен — забываем
+            if oz_status in ("delivered", "delivering"):
                 st.forgotten = 1
-                st.last_status = "cancelled"
-                st.missed_cycles = 0
                 store.upsert(st)
+                continue
 
-            elif oz_status == "delivered":
-                if st.ms_order_id and not cfg.dry_run:
-                    ms_state_id = ms_state_id_for_ozon_status("delivered", None)
-                    if ms_state_id:
-                        ms.set_order_state(st.ms_order_id, ms_state_id)
-
-                log.info("FORGET posting=%s reason=delivered", st.posting_number)
-                st.forgotten = 1
-                st.last_status = "delivered"
-                st.missed_cycles = 0
-                store.upsert(st)
-
-            else:
-                st.missed_cycles = 0
-                store.upsert(st)
+            # иначе просто обновили last_seen/missed и оставили
+            st.missed_cycles = 0
+            st.last_seen_ts = now_ts
+            store.upsert(st)
 
         except Exception as e:
             log.error("FINALIZE posting=%s failed: %s", st.posting_number, e, exc_info=True)
+            # не забываем, попробуем в следующем цикле
+            st.missed_cycles = 0
             store.upsert(st)
