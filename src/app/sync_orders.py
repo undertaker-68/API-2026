@@ -171,8 +171,20 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                                 })
                                 log.info("MS create Demand posting=%s order_id=%s -> demand_created=1", posting_number, order_id)
                             except Exception as e:
-                                log.error("MS create Demand failed posting=%s: %s", posting_number, e)
-                                # не помечаем demand_created, пусть повторит
+                                msg = str(e)
+                                log.error("MS create Demand failed posting=%s: %s", posting_number, msg)
+
+                                # нет остатков — пропускаем и забываем
+                                if "3007" in msg or "нет на складе" in msg.lower():
+                                    log.warning("MS Demand blocked by stock, FORGET posting=%s", posting_number)
+                                    store.upsert(OrderState(
+                                        posting_number, order_id, oz_status,
+                                        0, s.move_created, 1,  # forgotten = 1
+                                        now_ts, 0
+                                    ))
+                                    continue
+
+                                # прочие ошибки — оставляем на повтор
                                 store.upsert(OrderState(posting_number, order_id, oz_status, 0, s.move_created, 0, now_ts, 0))
                                 continue
 
