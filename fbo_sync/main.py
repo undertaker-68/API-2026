@@ -178,6 +178,9 @@ def main():
 
                 # 1) CustomerOrder
                 if cur_state == "READY_TO_SUPPLY" and not st.order_done:
+                    if not positions:
+                        continue
+                    
                     body = {
                         "name": order_number,
                         "organization": ms.mk_ref("organization", cfg.org_id),
@@ -187,6 +190,7 @@ def main():
                         "reserve": True,
                         "deliveryPlannedMoment": delivery_planned,
                         "description": comment,
+                        "store": ms.mk_ref("store", STORE_FBO_ID),
                     }
                     try:
                         if not cfg.dry_run:
