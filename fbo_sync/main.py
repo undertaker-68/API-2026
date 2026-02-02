@@ -43,7 +43,7 @@ def load_cfg_from_env() -> Cfg:
         ms_base_url=os.getenv("MS_BASE_URL", "https://api.moysklad.ru/api/remap/1.2"),
         org_id=must("MS_ORG_ID"),
         agent_id=must("MS_AGENT_ID"),
-        sales_channel_id=must("MS_SALES_CHANNEL_ID"),
+        sales_channel_id=os.getenv("MS_SALES_CHANNEL_ID_FBO") or must("MS_SALES_CHANNEL_ID"),
         dry_run=os.getenv("DRY_RUN", "0") == "1",
     )
 
