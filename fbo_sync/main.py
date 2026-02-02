@@ -4,7 +4,7 @@ import time
 import math
 from datetime import datetime, timezone
 from collections import defaultdict
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List
 
 from .settings import (
     POLL_SECONDS, calc_window,
@@ -14,9 +14,10 @@ from .settings import (
 )
 from .ozon_fbo import OzonFboClient
 from .ms_api import MoySkladClient, MoySkladError
-from .state import StateStore, SupplyState
+from .state import StateStore
 
 from dataclasses import dataclass
+
 
 @dataclass(frozen=True)
 class Cfg:
@@ -28,6 +29,7 @@ class Cfg:
     agent_id: str
     sales_channel_id: str
     dry_run: bool
+
 
 def load_cfg_from_env() -> Cfg:
     def must(k: str) -> str:
@@ -47,11 +49,12 @@ def load_cfg_from_env() -> Cfg:
         dry_run=os.getenv("DRY_RUN", "0") == "1",
     )
 
+
 def iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
+
 def aggregate_ozon_positions(oz: OzonFboClient, bundle_ids: List[str]) -> Dict[str, int]:
-    # offer_id -> qty
     agg: Dict[str, int] = defaultdict(int)
     for bid in bundle_ids:
         for it in oz.iter_bundle_items(bid):
@@ -61,56 +64,61 @@ def aggregate_ozon_positions(oz: OzonFboClient, bundle_ids: List[str]) -> Dict[s
                 agg[offer_id] += qty
     return dict(agg)
 
+
 def expand_ms_bundles(ms: MoySkladClient, offer_qty: Dict[str, int]) -> Dict[str, float]:
     """
-    Вход: offer_id(article) -> qty
-    Выход: article (уже товара/компонента) -> qty
+    offer_id(article) -> qty
+    return: assortment.href -> qty
     """
     out: Dict[str, float] = defaultdict(float)
 
     for offer_id, qty in offer_qty.items():
-        # сначала пробуем bundle
+        # 1) пробуем bundle в МС
         b = ms.get_bundle_by_article(offer_id)
         if b:
             bundle_id = b["id"]
             comps = ms.get_bundle_components(bundle_id)
+
             total_components = 0.0
             for comp_meta, comp_qty in comps:
-                # comp_meta -> entity type определить по href не будем, просто шлём meta
-                # но нам нужен article компонента: дотягиваем сущность не хотим -> используем meta напрямую в позициях
-                # поэтому ниже делаем спец: складываем по href, а не по article
-                # Упрощение: в позициях МС будем использовать assortment.meta прямо (это корректно)
                 href = comp_meta["href"]
                 out[href] += comp_qty * qty
                 total_components += comp_qty * qty
 
-            # спец-исключение offer_id=00233
+            # спец-исключение
             if offer_id == "00233":
                 add_qty = math.floor(total_components / 5.0)
                 if add_qty > 0:
                     p = ms.get_product_by_article("00651") or ms.get_bundle_by_article("00651")
                     if p:
-                        href = p["meta"]["href"] if "meta" in p else p["meta"]["href"]
-                        out[href] += add_qty
+                        out[p["meta"]["href"]] += add_qty
             continue
 
-        # иначе обычный product
+        # 2) обычный product
         p = ms.get_product_by_article(offer_id)
         if not p:
-            # если нет в МС — пропускаем позицию
             continue
+
         out[p["meta"]["href"]] += qty
 
     return dict(out)
 
+
 def ms_positions_from_hrefs(ms_qty_by_href: Dict[str, float]) -> List[Dict[str, Any]]:
-    res = []
-    for href, qty in ms_qty_by_href.items():
-        res.append({
-            "assortment": {"meta": {"href": href, "type": "assortment", "mediaType": "application/json"}},
+    return [
+        {
+            "assortment": {
+                "meta": {
+                    "href": href,
+                    "type": "assortment",
+                    "mediaType": "application/json",
+                }
+            },
             "quantity": qty,
-        })
-    return res
+        }
+        for href, qty in ms_qty_by_href.items()
+    ]
+
 
 def main():
     cfg = load_cfg_from_env()
@@ -123,26 +131,26 @@ def main():
         w = calc_window(now)
         since, to = iso(w.since), iso(w.to)
 
-        # Берём кандидатов: READY и CANCELLED (для переходов)
         ids = set()
         for st in (STATE_READY_TO_SUPPLY, STATE_CANCELLED):
             for oid in oz.list_order_ids(since, to, st, sort_by=1, limit=50):
                 ids.add(int(oid))
 
-        # GET пачками до 50
         ids_list = sorted(ids)
         for i in range(0, len(ids_list), 50):
-            batch = ids_list[i:i+50]
-            orders = oz.get_orders(batch)
+            orders = oz.get_orders(ids_list[i:i + 50])
 
             for o in orders:
                 order_number = str(o["order_number"]).strip()
                 cur_state = str(o.get("state") or "").strip()
-
                 st = state.get(order_number)
 
-                # если в МС уже есть любой документ с таким name (order), пропускаем всю поставку (как ты хотел)
-                if ms.find_by_name("customerorder", order_number) or ms.find_by_name("move", order_number) or ms.find_by_name("demand", order_number):
+                # если уже есть любой документ с таким name — пропускаем поставку
+                if (
+                    ms.find_by_name("customerorder", order_number)
+                    or ms.find_by_name("move", order_number)
+                    or ms.find_by_name("demand", order_number)
+                ):
                     st.order_done = True
                     st.move_done = True
                     st.demand_done = True
@@ -150,14 +158,25 @@ def main():
                     state.set(order_number, st)
                     continue
 
-                # соберём bundle_id из всех supplies
                 supplies = o.get("supplies", []) or []
                 bundle_ids = [s.get("bundle_id") for s in supplies if s.get("bundle_id")]
                 offer_qty = aggregate_ozon_positions(oz, bundle_ids)
                 ms_qty_by_href = expand_ms_bundles(ms, offer_qty)
                 positions = ms_positions_from_hrefs(ms_qty_by_href)
 
-                # 1) CustomerOrder создаём при READY_TO_SUPPLY
+                # плановая дата (берём timeslot.from, дата важнее времени)
+                delivery_planned = None
+                ts_from = ((o.get("timeslot") or {}).get("timeslot") or {}).get("from")
+                if ts_from:
+                    delivery_planned = f"{str(ts_from)[:10]} 00:00:00"
+
+                # комментарий
+                wh_name = ""
+                if supplies:
+                    wh_name = ((supplies[0].get("storage_warehouse") or {}).get("name") or "")
+                comment = f"{order_number} - {wh_name}" if wh_name else order_number
+
+                # 1) CustomerOrder
                 if cur_state == "READY_TO_SUPPLY" and not st.order_done:
                     body = {
                         "name": order_number,
@@ -166,16 +185,17 @@ def main():
                         "salesChannel": ms.mk_ref("saleschannel", cfg.sales_channel_id),
                         "positions": positions,
                         "reserve": True,
+                        "deliveryPlannedMoment": delivery_planned,
+                        "description": comment,
                     }
                     try:
                         if not cfg.dry_run:
                             ms.create_customer_order(body)
                         st.order_done = True
                     except MoySkladError:
-                        # если заказ не создался — пропускаем поставку до следующего цикла
                         pass
 
-                # 2) Move при READY_TO_SUPPLY (с retry applicable true -> false)
+                # 2) Move
                 if cur_state == "READY_TO_SUPPLY" and not st.move_done:
                     body = {
                         "name": order_number,
@@ -184,23 +204,23 @@ def main():
                         "targetStore": ms.mk_ref("store", STORE_FBO_ID),
                         "state": ms.mk_ref("state", MOVE_STATE_ID),
                         "positions": positions,
+                        "description": comment,
                     }
                     try:
                         if cfg.dry_run:
                             st.move_done = True
                         else:
                             created = ms.try_create_move_with_fallback(body)
-                            if created is not None:
-                                st.move_done = True
-                            else:
-                                # конфликт номера -> пропускаем всю поставку (как ты сказал)
-                                st.move_done = True
+                            st.move_done = True if created is not None else True
                     except MoySkladError:
-                        # прочие ошибки — попробуем в следующем цикле
                         pass
 
-                # 3) Demand при выходе из READY_TO_SUPPLY на любой другой, кроме CANCELLED
-                if st.last_state == "READY_TO_SUPPLY" and cur_state not in ("READY_TO_SUPPLY", "CANCELLED") and not st.demand_done:
+                # 3) Demand
+                if (
+                    st.last_state == "READY_TO_SUPPLY"
+                    and cur_state not in ("READY_TO_SUPPLY", "CANCELLED")
+                    and not st.demand_done
+                ):
                     body = {
                         "name": order_number,
                         "organization": ms.mk_ref("organization", cfg.org_id),
@@ -208,13 +228,13 @@ def main():
                         "store": ms.mk_ref("store", STORE_FBO_ID),
                         "state": ms.mk_ref("state", DEMAND_STATE_ID),
                         "positions": positions,
+                        "description": comment,
                     }
                     try:
                         if not cfg.dry_run:
                             ms.create_demand(body)
                         st.demand_done = True
                     except MoySkladError:
-                        # если demand не сохранить — пропускаем (как ты требовал)
                         st.demand_done = True
 
                 st.last_state = cur_state
@@ -222,6 +242,7 @@ def main():
 
         state.save()
         time.sleep(POLL_SECONDS)
+
 
 if __name__ == "__main__":
     main()
