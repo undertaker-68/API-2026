@@ -38,8 +38,14 @@ class MoySkladClient:
 
     def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
         r = self.s.post(self.base + path, json=body, timeout=self.timeout)
+
+        if r.status_code == 429:
+            # лимит МойСклад — считаем, что операция не выполнена
+            return {}
+
         if r.status_code >= 400:
             raise MoySkladError(r.status_code, r.text)
+
         return r.json()
 
     def find_by_name(self, entity: str, name: str) -> Dict[str, Any] | None:
