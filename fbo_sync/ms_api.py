@@ -24,11 +24,11 @@ class MoySkladClient:
         })
         self.timeout = timeout
 
-    def _get(self, path: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def _get(self, path: str, params: dict | None = None) -> dict:
         r = self.s.get(self.base + path, params=params, timeout=self.timeout)
 
         if r.status_code == 429:
-            # лимит МС — просто даём пережить итерацию
+            # лимит МойСклад — просто считаем, что данных нет
             return {"rows": []}
 
         if r.status_code >= 400:
