@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from collections import defaultdict
 from typing import Dict, Any, List, Tuple
 
-from config import load_config
 from .settings import (
     POLL_SECONDS, calc_window,
     STORE_MAIN_ID, STORE_FBO_ID,
@@ -16,6 +15,37 @@ from .settings import (
 from .ozon_fbo import OzonFboClient
 from .ms_api import MoySkladClient, MoySkladError
 from .state import StateStore, SupplyState
+
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class Cfg:
+    ozon_client_id: str
+    ozon_api_key: str
+    ms_token: str
+    ms_base_url: str
+    org_id: str
+    agent_id: str
+    sales_channel_id: str
+    dry_run: bool
+
+def load_cfg_from_env() -> Cfg:
+    def must(k: str) -> str:
+        v = os.getenv(k)
+        if not v:
+            raise RuntimeError(f"Missing env {k}")
+        return v
+
+    return Cfg(
+        ozon_client_id=must("OZON_CLIENT_ID"),
+        ozon_api_key=must("OZON_API_KEY"),
+        ms_token=must("MS_TOKEN"),
+        ms_base_url=os.getenv("MS_BASE_URL", "https://api.moysklad.ru/api/remap/1.2"),
+        org_id=must("MS_ORG_ID"),
+        agent_id=must("MS_AGENT_ID"),
+        sales_channel_id=must("MS_SALES_CHANNEL_ID"),
+        dry_run=os.getenv("DRY_RUN", "0") == "1",
+    )
 
 def iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -83,7 +113,7 @@ def ms_positions_from_hrefs(ms_qty_by_href: Dict[str, float]) -> List[Dict[str, 
     return res
 
 def main():
-    cfg = load_config()  # берём всё из первого проекта:contentReference[oaicite:4]{index=4}
+    cfg = load_cfg_from_env()
     oz = OzonFboClient(cfg.ozon_client_id, cfg.ozon_api_key)
     ms = MoySkladClient(cfg.ms_base_url, cfg.ms_token)
     state = StateStore(path=os.path.join(os.path.dirname(__file__), "state.json"))
