@@ -26,8 +26,14 @@ class MoySkladClient:
 
     def _get(self, path: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
         r = self.s.get(self.base + path, params=params, timeout=self.timeout)
+
+        if r.status_code == 429:
+            # лимит МС — просто даём пережить итерацию
+            return {"rows": []}
+
         if r.status_code >= 400:
             raise MoySkladError(r.status_code, r.text)
+
         return r.json()
 
     def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
