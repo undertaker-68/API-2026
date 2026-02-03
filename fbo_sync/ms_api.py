@@ -1,7 +1,11 @@
 from __future__ import annotations
+
 import time
-import requests
 from typing import Dict, Any, List, Tuple
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 class MoySkladError(Exception):
@@ -20,24 +24,42 @@ class MoySkladClient:
     def __init__(self, base_url: str, token: str, timeout: int = 30):
         self.base = base_url.rstrip("/")
         self.s = requests.Session()
-        # ВАЖНО: без Content-Type на GET (у вас иначе 415 от nginx)
-        self.s.headers.update({
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json;charset=utf-8",
-        })
-        self.timeout = timeout
+
+        # ВАЖНО: без Content-Type на GET (иначе у вас 415 от nginx)
+        self.s.headers.update(
+            {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json;charset=utf-8",
+            }
+        )
+
+        # (connect, read) — чтобы не висеть бесконечно на ответе
+        # timeout аргумент оставляем для совместимости, но используем tuple
+        self.timeout = (3, min(int(timeout), 30))
+
+        # Нормальные ретраи на сетевые ошибки и временные статусы
+        retry = Retry(
+            total=5,
+            connect=5,
+            read=5,
+            backoff_factor=1,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=("GET", "POST", "PUT", "DELETE"),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+        self.s.mount("https://", adapter)
+        self.s.mount("http://", adapter)
 
     def _get(self, path: str, params: dict | None = None) -> dict:
-        # retry на 429
-        delay = 1.0
-        for _ in range(5):
+        try:
             r = self.s.get(self.base + path, params=params, timeout=self.timeout)
-            if r.status_code != 429:
-                break
-            time.sleep(delay)
-            delay = min(delay * 2.0, 8.0)
+        except Exception:
+            # сеть/таймаут/обрыв — не стопорим цикл, считаем что данных нет
+            return {"rows": []}
 
         if r.status_code == 429:
+            # лимит МойСклад — просто считаем, что данных нет
             return {"rows": []}
 
         if r.status_code >= 400:
@@ -46,13 +68,10 @@ class MoySkladClient:
         return r.json()
 
     def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
-        delay = 1.0
-        for _ in range(5):
+        try:
             r = self.s.post(self.base + path, json=body, timeout=self.timeout)
-            if r.status_code != 429:
-                break
-            time.sleep(delay)
-            delay = min(delay * 2.0, 8.0)
+        except Exception as e:
+            raise MoySkladError(0, f"network/post failed: {e}")
 
         if r.status_code == 429:
             raise MoySkladError(429, r.text)
@@ -73,7 +92,6 @@ class MoySkladClient:
         return rows[0] if rows else None
 
     def get_bundle_components(self, bundle_id: str) -> List[Tuple[Dict[str, Any], float]]:
-        # В МС компоненты комплекта отдаются отдельным эндпоинтом:
         # /entity/bundle/{id}/components
         out = self._get(f"/entity/bundle/{bundle_id}/components", params={"limit": 1000})
         rows = out.get("rows", []) or []
