@@ -16,20 +16,24 @@ class OzonFboClient:
 
     def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
         delay = 1.0
-        for _ in range(6):
+        for _ in range(8):
             r = requests.post(
                 self.base + path,
                 headers=self.headers,
                 json=body,
                 timeout=self.timeout,
             )
-            if r.status_code != 429:
-                r.raise_for_status()
-                return r.json()
-            time.sleep(delay)
-            delay = min(delay * 2.0, 10.0)
 
-        # если прям жёстко лимит — не падаем, но возвращаем пустое
+            # ретраи на лимиты и временные ошибки озона
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(delay)
+                delay = min(delay * 2.0, 15.0)
+                continue
+
+            r.raise_for_status()
+            return r.json()
+
+        # если озон продолжает отдавать лимиты/ошибки — не валим сервис
         return {"items": [], "has_next": False, "last_id": "", "order_ids": [], "orders": []}
 
     def list_order_ids(

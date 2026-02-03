@@ -73,11 +73,12 @@ class MoySkladClient:
         return rows[0] if rows else None
 
     def get_bundle_components(self, bundle_id: str) -> List[Tuple[Dict[str, Any], float]]:
-        # returns [(component_assortment_meta, qty), ...]
-        bundle = self._get(f"/entity/bundle/{bundle_id}")
-        comps = bundle.get("components", {}).get("rows", []) or []
+        # В МС компоненты комплекта отдаются отдельным эндпоинтом:
+        # /entity/bundle/{id}/components
+        out = self._get(f"/entity/bundle/{bundle_id}/components", params={"limit": 1000})
+        rows = out.get("rows", []) or []
         res: List[Tuple[Dict[str, Any], float]] = []
-        for c in comps:
+        for c in rows:
             res.append((c["assortment"]["meta"], float(c["quantity"])))
         return res
 
