@@ -55,7 +55,7 @@ class MoySkladClient:
             delay = min(delay * 2.0, 8.0)
 
         if r.status_code == 429:
-            return {}
+            raise MoySkladError(429, r.text)
 
         if r.status_code >= 400:
             raise MoySkladError(r.status_code, r.text)
