@@ -1,7 +1,8 @@
 from __future__ import annotations
 import requests
-from datetime import datetime
+import time
 from typing import List, Dict, Any, Iterable
+
 
 class OzonFboClient:
     def __init__(self, client_id: str, api_key: str, timeout: int = 30):
@@ -14,11 +15,35 @@ class OzonFboClient:
         self.timeout = timeout
 
     def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
-        r = requests.post(self.base + path, headers=self.headers, json=body, timeout=self.timeout)
+        r = requests.post(
+            self.base + path,
+            headers=self.headers,
+            json=body,
+            timeout=self.timeout,
+        )
+
+        if r.status_code == 429:
+            # rate limit Ozon — не падаем, даём сервису жить
+            time.sleep(2)
+            return {
+                "items": [],
+                "has_next": False,
+                "last_id": "",
+                "order_ids": [],
+                "orders": [],
+            }
+
         r.raise_for_status()
         return r.json()
 
-    def list_order_ids(self, since_iso: str, to_iso: str, state_enum: int, sort_by: int = 1, limit: int = 50) -> List[int]:
+    def list_order_ids(
+        self,
+        since_iso: str,
+        to_iso: str,
+        state_enum: int,
+        sort_by: int = 1,
+        limit: int = 50,
+    ) -> List[int]:
         body = {
             "filter": {"since": since_iso, "to": to_iso, "states": [state_enum]},
             "sort_by": sort_by,
@@ -35,14 +60,19 @@ class OzonFboClient:
         last_id = ""
         while True:
             body = {"bundle_ids": [bundle_id], "limit": 100}
-            if last_id != "":
+            if last_id:
                 body["last_id"] = last_id
+
             out = self._post("/v1/supply-order/bundle", body)
+
             for it in out.get("items", []) or []:
                 yield it
+
             if not out.get("has_next"):
                 break
+
             nxt = out.get("last_id", "")
             if not nxt or nxt == last_id:
                 break
+
             last_id = nxt
