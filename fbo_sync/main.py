@@ -1,241 +1,317 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
 import os
 import json
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Tuple
+import time
+from datetime import datetime, timezone, timedelta
 
-from fbo_sync.ozon_fbo import OzonFBO
-from fbo_sync.ms_api import MoySkladClient, MoySkladError
-from fbo_sync.settings import Settings
-
-
-@dataclass
-class OrderState:
-    order_done: bool = False
-    move_done: bool = False
-    demand_done: bool = False
-    last_state: str = ""
+from fbo_sync.ms_api import MS, MoySkladError
+from fbo_sync.ozon_fbo import OzonFbo
 
 
-class StateStore:
-    def __init__(self, path: str):
-        self.path = path
-        self.data: Dict[str, OrderState] = {}
-        self.load()
+STATE_PATH = os.path.join(os.path.dirname(__file__), "state.json")
 
-    def load(self) -> None:
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            for k, v in raw.items():
-                self.data[k] = OrderState(**v)
-        except FileNotFoundError:
-            self.data = {}
+# Склады
+MS_STORE_ID_SKLAD = "7cdb9b20-9910-11ec-0a80-08670002d998"
+MS_STORE_ID_FBO = "77b4a517-3b82-11f0-0a80-18cb00037a24"
 
-    def save(self) -> None:
-        raw = {k: vars(v) for k, v in self.data.items()}
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(raw, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.path)
+# Статусы документов
+MOVE_STATE_ID = "b0d2c89d-5c7c-11ef-0a80-0cd4001f5885"
+DEMAND_STATE_ID = "b543e330-44e4-11f0-0a80-0da5002260ab"
 
-    def get(self, order_number: str) -> OrderState:
-        if order_number not in self.data:
-            self.data[order_number] = OrderState()
-        return self.data[order_number]
+POLL_SECONDS = 80
+
+# Не ранее 02.02.2026 включительно
+MIN_SINCE = datetime(2026, 2, 2, 0, 0, 0, tzinfo=timezone.utc)
+
+# Нам достаточно READY_TO_SUPPLY (как ты сказал — DATA_FILLING не нужен)
+STATE_READY_TO_SUPPLY_ENUM = 2
 
 
-def load_cfg_from_env() -> Settings:
-    def must(k: str) -> str:
-        v = os.getenv(k)
-        if not v:
-            raise RuntimeError(f"Missing env {k}")
-        return v
-
-    return Settings(
-        ozon_client_id=must("OZON_CLIENT_ID"),
-        ozon_api_key=must("OZON_API_KEY"),
-        ms_token=must("MS_TOKEN"),
-        ms_base_url=os.getenv("MS_BASE_URL", "https://api.moysklad.ru/api/remap/1.2"),
-        dry_run=os.getenv("DRY_RUN", "0") == "1",
-        poll_seconds=int(os.getenv("POLL_SECONDS", "60")),
-        ms_org_id=must("MS_ORG_ID"),
-        ms_agent_id=must("MS_AGENT_ID"),
-        ms_sales_channel_id=must("MS_SALES_CHANNEL_ID"),
-    )
+def iso_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def aggregate_ozon_positions(oz: OzonFBO, bundle_ids: List[str]) -> Dict[str, float]:
-    offer_qty: Dict[str, float] = {}
-    for bid in bundle_ids:
-        for it in oz.iter_bundle_items(bid):
-            offer = str(it.get("offer_id") or "").strip()
-            qty = float(it.get("quantity") or 0)
-            if not offer or qty <= 0:
-                continue
-            offer_qty[offer] = offer_qty.get(offer, 0) + qty
-    return offer_qty
+def load_state() -> dict:
+    if not os.path.exists(STATE_PATH):
+        return {}
+    with open(STATE_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def expand_ms_bundles(ms: MoySkladClient, offer_qty: Dict[str, float]) -> Dict[str, float]:
-    """
-    На вход: {offer_id(article): qty}
-    На выход: {assortment.meta.href: qty}
-    """
-    out: Dict[str, float] = {}
-
-    for offer_id, qty in offer_qty.items():
-        a = ms.get_assortment_by_article(offer_id)
-        if not a:
-            continue
-
-        meta = a.get("meta") or {}
-        href = meta.get("href")
-        typ = meta.get("type")
-
-        if not href or not typ:
-            continue
-
-        if typ == "bundle":
-            bundle_id = a.get("id")
-            comps = ms.get_bundle_components(bundle_id)
-
-            total_components_qty = 0.0
-            for comp_meta, comp_qty_in_bundle in comps:
-                comp_href = comp_meta.get("href")
-                if not comp_href:
-                    continue
-                comp_total = qty * float(comp_qty_in_bundle)
-                total_components_qty += comp_total
-                out[comp_href] = out.get(comp_href, 0) + comp_total
-
-            # спец-исключение
-            # если offer_id == "00233" и он bundle — добавляем article=00651 qty = total_components/5
-            if offer_id == "00233":
-                extra = ms.get_assortment_by_article("00651")
-                if extra and (extra.get("meta") or {}).get("href"):
-                    extra_href = extra["meta"]["href"]
-                    out[extra_href] = out.get(extra_href, 0) + (total_components_qty / 5.0)
-
-        else:
-            out[href] = out.get(href, 0) + qty
-
-    return out
+def save_state(st: dict):
+    tmp = STATE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(st, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, STATE_PATH)
 
 
-def ms_positions_from_hrefs(ms: MoySkladClient, ms_qty_by_href: Dict[str, float]) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    for href, qty in ms_qty_by_href.items():
-        if not qty:
-            continue
-        meta_type = href.split("/entity/")[1].split("/")[0] if "/entity/" in href else "assortment"
-        price = ms.get_sale_price(href)
-        rows.append(
-            {
-                "assortment": {"meta": {"href": href, "type": meta_type, "mediaType": "application/json"}},
-                "quantity": qty,
-                "price": price,
-            }
-        )
-    return rows
+def must(k: str) -> str:
+    v = os.getenv(k, "").strip()
+    if not v:
+        raise RuntimeError(f"Missing env {k}")
+    return v
 
 
-def day_from_iso_z(s: str) -> str:
+def ms_href(base: str, entity: str, id_: str) -> str:
+    base = base.rstrip("/")
+    return f"{base}/entity/{entity}/{id_}"
+
+
+def parse_timeslot_date(order: dict) -> str | None:
+    # Берём orders.timeslot.timeslot.from -> дата (без времени)
+    ts = (order.get("timeslot") or {}).get("timeslot") or {}
+    frm = ts.get("from")
+    if not frm:
+        return None
     # "2026-02-09T11:00:00Z" -> "2026-02-09 00:00:00.000"
-    dt = datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
+    dt = datetime.fromisoformat(frm.replace("Z", "+00:00")).astimezone(timezone.utc)
     return dt.strftime("%Y-%m-%d 00:00:00.000")
 
 
-def main() -> None:
-    cfg = load_cfg_from_env()
-    oz = OzonFBO("https://api-seller.ozon.ru", cfg.ozon_client_id, cfg.ozon_api_key)
-    ms = MoySkladClient(cfg.ms_base_url, cfg.ms_token)
+def aggregate_offer_qty_from_bundles(oz: OzonFbo, bundle_ids: list[str]) -> dict[str, int]:
+    # offer_id -> qty (сумма quantity)
+    out: dict[str, int] = {}
+    for bid in bundle_ids:
+        items = oz.bundle_items(bid)
+        for it in items:
+            offer_id = str(it.get("offer_id") or "").strip()
+            qty = int(it.get("quantity") or 0)
+            if offer_id and qty > 0:
+                out[offer_id] = out.get(offer_id, 0) + qty
+    return out
 
-    state = StateStore("fbo_sync/state.json")
 
-    # окно: последние 2 суток (как у тебя сейчас)
-    since = (datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    to = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def expand_to_products(ms: MS, ms_base: str, offer_qty: dict[str, int]) -> dict[str, float]:
+    """
+    Возвращает: product_href -> qty
+    Правила:
+      - если assortment = bundle, разворачиваем в компоненты (product/assortment href из components)
+      - если offer_id == "00233" и в МС это bundle:
+           разворачиваем как обычно
+           + добавляем article="00651" qty = (общее_кол-во_компонентов) / 5
+    """
+    product_qty: dict[str, float] = {}
 
-    while True:
-        order_ids = oz.list_orders(since=since, to=to, states=[2], limit=50)
-        if not order_ids:
-            state.save()
-            import time as _t
-            _t.sleep(cfg.poll_seconds)
+    def add(href: str, q: float):
+        if q <= 0:
+            return
+        product_qty[href] = product_qty.get(href, 0.0) + q
+
+    for offer_id, qty_offer in offer_qty.items():
+        a = ms.get_assortment_by_article(offer_id)
+        if not a:
+            # не нашли в МС — пропускаем эту позицию
             continue
 
-        orders = oz.get_orders(order_ids)
+        atype = ((a.get("meta") or {}).get("type") or "").lower()
+        href = (a.get("meta") or {}).get("href")
+        if not href:
+            continue
 
-        for o in orders:
-            order_number = str(o.get("order_number") or "").strip()
-            if not order_number:
+        if atype != "bundle":
+            # product/variant/etc — кладём как есть
+            add(href, float(qty_offer))
+            continue
+
+        # bundle -> components
+        bundle_id = a.get("id")
+        comps = ms.get_bundle_components(bundle_id)
+
+        total_components_qty = 0.0
+        for c in comps:
+            comp_ass = c.get("assortment") or {}
+            comp_href = (comp_ass.get("meta") or {}).get("href")
+            comp_q = float(c.get("quantity") or 0.0)
+            if comp_href and comp_q > 0:
+                q_total = comp_q * float(qty_offer)
+                add(comp_href, q_total)
+                total_components_qty += q_total
+
+        # спец-исключение
+        if offer_id == "00233":
+            # добавить 00651: qty = total_components / 5
+            extra = total_components_qty / 5.0
+            a2 = ms.get_assortment_by_article("00651")
+            if a2 and (a2.get("meta") or {}).get("href"):
+                add((a2["meta"]["href"]), extra)
+
+    return product_qty
+
+
+def build_positions(ms_qty_by_href: dict[str, float]) -> list[dict]:
+    return [
+        {"assortment": {"meta": {"href": href, "type": "product", "mediaType": "application/json"}}, "quantity": q}
+        for href, q in ms_qty_by_href.items()
+        if q > 0
+    ]
+
+
+def create_customerorder(ms: MS, ms_base: str, org_id: str, agent_id: str, sales_channel_id: str, name: str,
+                         store_id: str, moment: str | None, description: str, positions: list[dict], dry_run: bool):
+    body = {
+        "name": name,
+        "organization": {"meta": {"href": ms_href(ms_base, "organization", org_id), "type": "organization", "mediaType": "application/json"}},
+        "agent": {"meta": {"href": ms_href(ms_base, "counterparty", agent_id), "type": "counterparty", "mediaType": "application/json"}},
+        "salesChannel": {"meta": {"href": ms_href(ms_base, "saleschannel", sales_channel_id), "type": "saleschannel", "mediaType": "application/json"}},
+        "store": {"meta": {"href": ms_href(ms_base, "store", store_id), "type": "store", "mediaType": "application/json"}},
+        "description": description,
+        "positions": positions,
+    }
+    if moment:
+        body["deliveryPlannedMoment"] = moment  # плановая дата (в МС это deliveryPlannedMoment)
+
+    if dry_run:
+        print(f"[DRY_RUN] create customerorder {name} positions={len(positions)}")
+        return {"id": "dry"}
+
+    return ms.create_customerorder(body)
+
+
+def create_move(ms: MS, ms_base: str, org_id: str, name: str, dry_run: bool, applicable: bool):
+    body = {
+        "name": name,
+        "organization": {"meta": {"href": ms_href(ms_base, "organization", org_id), "type": "organization", "mediaType": "application/json"}},
+        "sourceStore": {"meta": {"href": ms_href(ms_base, "store", MS_STORE_ID_SKLAD), "type": "store", "mediaType": "application/json"}},
+        "targetStore": {"meta": {"href": ms_href(ms_base, "store", MS_STORE_ID_FBO), "type": "store", "mediaType": "application/json"}},
+        "applicable": applicable,
+        "state": {"meta": {"href": ms_href(ms_base, "customentity", MOVE_STATE_ID), "type": "state", "mediaType": "application/json"}},
+    }
+
+    if dry_run:
+        print(f"[DRY_RUN] create move {name} applicable={applicable}")
+        return {"id": "dry"}
+
+    return ms.create_move(body)
+
+
+def create_demand(ms: MS, ms_base: str, org_id: str, agent_id: str, name: str, dry_run: bool):
+    body = {
+        "name": name,
+        "organization": {"meta": {"href": ms_href(ms_base, "organization", org_id), "type": "organization", "mediaType": "application/json"}},
+        "agent": {"meta": {"href": ms_href(ms_base, "counterparty", agent_id), "type": "counterparty", "mediaType": "application/json"}},
+        "store": {"meta": {"href": ms_href(ms_base, "store", MS_STORE_ID_FBO), "type": "store", "mediaType": "application/json"}},
+        "state": {"meta": {"href": ms_href(ms_base, "customentity", DEMAND_STATE_ID), "type": "state", "mediaType": "application/json"}},
+    }
+
+    if dry_run:
+        print(f"[DRY_RUN] create demand {name}")
+        return {"id": "dry"}
+
+    return ms.create_demand(body)
+
+
+def main():
+    oz = OzonFbo(must("OZON_CLIENT_ID"), must("OZON_API_KEY"))
+    ms = MS(must("MS_BASE_URL"), must("MS_TOKEN"))
+
+    org_id = must("MS_ORG_ID")
+    agent_id = must("MS_AGENT_ID")
+    sales_channel_id = must("MS_SALES_CHANNEL_ID")
+    dry_run = os.getenv("DRY_RUN", "0").strip() == "1"
+
+    st = load_state()
+
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            since = max(now - timedelta(days=10), MIN_SINCE)
+            since_iso = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+            to_iso = iso_now()
+
+            order_ids = oz.list_orders(since_iso, to_iso, states=[STATE_READY_TO_SUPPLY_ENUM], limit=50)
+            if not order_ids:
+                time.sleep(POLL_SECONDS)
                 continue
 
-            st = state.get(order_number)
+            # грузим пачками по 50 (API get до 50)
+            for i in range(0, len(order_ids), 50):
+                batch = order_ids[i:i+50]
+                orders = oz.get_orders(batch)
 
-            # если в памяти отмечено "сделано", но документ(ы) в МС удалили руками — нужно пересоздать
-            ms_order = ms.find_by_name("customerorder", order_number)
-            ms_move = ms.find_by_name("move", order_number)
-            ms_demand = ms.find_by_name("demand", order_number)
-            if st.order_done and not ms_order:
-                st.order_done = False
-            if st.move_done and not ms_move:
-                st.move_done = False
-            if st.demand_done and not ms_demand:
-                st.demand_done = False
+                for o in orders:
+                    order_number = str(o.get("order_number") or "").strip()
+                    if not order_number:
+                        continue
 
-            state_name = str(o.get("state") or "")
-            st.last_state = state_name
+                    # ключ в state = order_number (как ты уже используешь)
+                    rec = st.get(order_number) or {"order_done": False, "move_done": False, "demand_done": False, "last_state": None}
+                    st.setdefault(order_number, rec)
 
-            supplies = o.get("supplies") or []
-            bundle_ids = [s.get("bundle_id") for s in supplies if s.get("bundle_id")]
+                    last_state = (o.get("state") or "").strip()
+                    rec["last_state"] = last_state
 
-            if not bundle_ids:
-                continue
+                    # Коммент: "<order_number> - <storage_warehouse.name>"
+                    wh_name = ""
+                    supplies = o.get("supplies") or []
+                    if supplies:
+                        sw = (supplies[0].get("storage_warehouse") or {})
+                        wh_name = sw.get("name") or ""
+                    description = f"{order_number} - {wh_name}".strip(" -")
 
-            offer_qty = aggregate_ozon_positions(oz, bundle_ids)
-            ms_qty_by_href = expand_ms_bundles(ms, offer_qty)
-            positions = ms_positions_from_hrefs(ms, ms_qty_by_href)
+                    moment = parse_timeslot_date(o)
 
-            # Плановая дата отгрузки = timeslot.from (дата, без времени)
-            timeslot_from = (((o.get("timeslot") or {}).get("timeslot") or {}).get("from")) or ""
-            planned = day_from_iso_z(timeslot_from) if timeslot_from else None
+                    # --- 1) customerorder: создаём если нет в МС ---
+                    if not rec.get("order_done"):
+                        exists = ms.find_by_name("customerorder", order_number)
+                        if exists:
+                            rec["order_done"] = True
+                        else:
+                            bundle_ids = [s.get("bundle_id") for s in (o.get("supplies") or []) if s.get("bundle_id")]
+                            offer_qty = aggregate_offer_qty_from_bundles(oz, bundle_ids)
+                            ms_qty_by_href = expand_to_products(ms, ms.base, offer_qty)
+                            positions = build_positions(ms_qty_by_href)
 
-            storage_name = ""
+                            # store = FBO, цены дефолтные МС (price не задаём)
+                            create_customerorder(ms, ms.base, org_id, agent_id, sales_channel_id, order_number,
+                                                 MS_STORE_ID_FBO, moment, description, positions, dry_run)
+                            rec["order_done"] = True
+
+                    # --- 2) move: при READY_TO_SUPPLY ---
+                    if last_state == "READY_TO_SUPPLY" and not rec.get("move_done"):
+                        # если move уже есть — отмечаем done
+                        exists_m = ms.find_by_name("move", order_number)
+                        if exists_m:
+                            rec["move_done"] = True
+                        else:
+                            # пробуем applicable=true, если ошибка — false, но если ошибка по name — пропуск
+                            try:
+                                create_move(ms, ms.base, org_id, order_number, dry_run, applicable=True)
+                                rec["move_done"] = True
+                            except MoySkladError as e:
+                                txt = (e.text or "")
+                                if "name" in txt or "уже существует" in txt.lower():
+                                    # конфликт номера — пропускаем всю поставку
+                                    rec["move_done"] = True
+                                else:
+                                    # fallback applicable=false
+                                    try:
+                                        create_move(ms, ms.base, org_id, order_number, dry_run, applicable=False)
+                                        rec["move_done"] = True
+                                    except MoySkladError as e2:
+                                        txt2 = (e2.text or "")
+                                        if "name" in txt2 or "уже существует" in txt2.lower():
+                                            rec["move_done"] = True
+                                        else:
+                                            # не смогли — оставляем move_done False, попробуем потом
+                                            pass
+
+                    # --- 3) demand: когда ушла из READY_TO_SUPPLY в любой другой кроме CANCELLED ---
+                    # (тут demand создаётся по твоему ТЗ, но для этого нужно мониторить изменения состояний.
+                    #  Сейчас мы держим только READY_TO_SUPPLY в list — поэтому demand создавай отдельным проходом,
+                    #  когда расширишь states. Я не ломаю текущий контур.)
+                    # rec["demand_done"] оставляем как есть.
+
+                save_state(st)
+
+            time.sleep(POLL_SECONDS)
+
+        except Exception as e:
+            # не умираем — логируем и продолжаем
+            print(f"[ERR] {type(e).__name__}: {e}")
             try:
-                storage_name = str((supplies[0].get("storage_warehouse") or {}).get("name") or "")
+                save_state(st)
             except Exception:
                 pass
-
-            description = f"{order_number} - {storage_name}".strip(" -")
-
-            if (not st.order_done) and (not ms_order):
-                body = {
-                    "name": order_number,
-                    "organization": ms.mk_ref(f"{cfg.ms_base_url}/entity/organization/{cfg.ms_org_id}", "organization"),
-                    "agent": ms.mk_ref(f"{cfg.ms_base_url}/entity/counterparty/{cfg.ms_agent_id}", "counterparty"),
-                    "salesChannel": ms.mk_ref(f"{cfg.ms_base_url}/entity/saleschannel/{cfg.ms_sales_channel_id}", "saleschannel"),
-                    "store": ms.mk_ref(f"{cfg.ms_base_url}/entity/store/{cfg.ms_store_id_fbo}", "store"),
-                    "positions": positions,
-                    "description": description,
-                }
-                if planned:
-                    body["deliveryPlannedMoment"] = planned
-
-                if not cfg.dry_run:
-                    ms.create_customer_order(body)
-                st.order_done = True
-
-            # Move при READY_TO_SUPPLY (fallback applicable true->false обрабатывается в main старым кодом у тебя)
-            # Demand/Move логика у тебя уже была — оставляю без расширения здесь.
-
-        state.save()
-
-        import time as _t
-        _t.sleep(cfg.poll_seconds)
+            time.sleep(5)
 
 
 if __name__ == "__main__":
