@@ -1,196 +1,152 @@
 from __future__ import annotations
 
 import time
+from typing import Any, Dict, List, Optional, Tuple
+
 import requests
-from typing import Dict, Any, List, Tuple, Optional
 
 
-class MoySkladError(Exception):
-    def __init__(self, status: int, payload: Any):
+class MoySkladError(RuntimeError):
+    def __init__(self, status: int, text: str):
+        super().__init__(f"MS error {status}: {text}")
         self.status = status
-        self.payload = payload
-        super().__init__(f"MS error {status}: {payload}")
-
-
-def _is_name_conflict(payload: Any) -> bool:
-    txt = str(payload).lower()
-    return ("name" in txt) or ("номер" in txt)
+        self.text = text
 
 
 class MoySkladClient:
-    """
-    Важное:
-    - НЕ ставим Content-Type в session headers (иначе можно получить 415 на GET).
-    - Делаем мягкий rate-limit (МС показывает x-ratelimit-limit=45 и retry-timeinterval=3000ms).
-    - На 429: ждём столько, сколько рекомендует МС (x-lognex-retry-after/x-lognex-retry-timeinterval),
-      иначе экспоненциальный backoff.
-    - Кешируем:
-      * assortment по article
-      * components по bundle_id
-      * find_by_name на короткое время (чтобы не долбить по 3 запроса на каждую поставку каждый цикл)
-    """
-
     def __init__(self, base_url: str, token: str, timeout: int = 30):
         self.base = base_url.rstrip("/")
         self.timeout = timeout
 
         self.s = requests.Session()
-        self.s.headers.update({
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json;charset=utf-8",
-        })
+        self.s.headers.update(
+            {
+                "Authorization": f"Bearer {token}",
+                # ВАЖНО: у MS Accept должен быть строго таким
+                "Accept": "application/json;charset=utf-8",
+            }
+        )
 
-        # --- rate limit ---
-        # МС обычно лимитирует "45 запросов / 3 сек" => ~15 rps. Делаем ~10-12 rps безопасно.
-        self._min_interval_sec = 0.09
-        self._last_req_ts = 0.0
-
-        # --- caches ---
-        self._assortment_by_article: Dict[str, Dict[str, Any]] = {}
-        self._bundle_components_by_id: Dict[str, List[Tuple[Dict[str, Any], float]]] = {}
-
-        # короткий кеш на find_by_name (на 10 сек)
-        self._find_cache: Dict[Tuple[str, str], Tuple[float, Optional[Dict[str, Any]]]] = {}
-        self._find_cache_ttl = 10.0
-
-    def _throttle(self):
-        now = time.time()
-        dt = now - self._last_req_ts
-        if dt < self._min_interval_sec:
-            time.sleep(self._min_interval_sec - dt)
-        self._last_req_ts = time.time()
-
-    @staticmethod
-    def _retry_sleep_from_headers(r: requests.Response) -> Optional[float]:
-        """
-        МС часто отдаёт:
-          x-lognex-retry-after: 0
-          x-lognex-retry-timeinterval: 3000   (мс)
-        либо Retry-After (сек)
-        """
-        ra = r.headers.get("Retry-After")
-        if ra:
-            try:
-                return float(ra)
-            except Exception:
-                pass
-
-        x_after = r.headers.get("x-lognex-retry-after")
-        if x_after:
-            try:
-                ms = float(x_after)
-                if ms > 0:
-                    return ms / 1000.0
-            except Exception:
-                pass
-
-        x_interval = r.headers.get("x-lognex-retry-timeinterval")
-        if x_interval:
-            try:
-                ms = float(x_interval)
-                if ms > 0:
-                    return ms / 1000.0
-            except Exception:
-                pass
-
-        return None
+        # кэши чтобы меньше ловить 429
+        self._assort_cache: Dict[str, dict] = {}
+        self._price_cache: Dict[str, float] = {}
 
     def _get(self, path: str, params: dict | None = None) -> dict:
-        backoff = 0.5
-        for _ in range(10):
-            self._throttle()
-            r = self.s.get(self.base + path, params=params, timeout=self.timeout)
+        url = self.base + path
+        for _ in range(5):
+            r = self.s.get(url, params=params, timeout=self.timeout)
 
-            if r.status_code != 429:
-                if r.status_code >= 400:
-                    raise MoySkladError(r.status_code, r.text)
-                return r.json()
+            if r.status_code == 429:
+                # лимит МойСклад — ждём и ретраим
+                time.sleep(3)
+                continue
 
-            # 429
-            sleep_s = self._retry_sleep_from_headers(r)
-            if sleep_s is None:
-                sleep_s = backoff
-                backoff = min(backoff * 2.0, 8.0)
-            time.sleep(sleep_s)
+            if r.status_code >= 400:
+                raise MoySkladError(r.status_code, r.text)
 
-        # после ретраев
-        raise MoySkladError(429, "Too Many Requests (retries exceeded)")
+            return r.json()
+
+        # после ретраев считаем, что "нет данных"
+        return {"rows": []}
 
     def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
-        backoff = 0.5
-        for _ in range(10):
-            self._throttle()
-            r = self.s.post(
-                self.base + path,
-                json=body,
-                timeout=self.timeout,
-                headers={"Content-Type": "application/json"},  # только на POST
-            )
+        url = self.base + path
+        for _ in range(5):
+            r = self.s.post(url, json=body, timeout=self.timeout)
 
-            if r.status_code != 429:
-                if r.status_code >= 400:
-                    raise MoySkladError(r.status_code, r.text)
-                return r.json()
+            if r.status_code == 429:
+                time.sleep(3)
+                continue
 
-            sleep_s = self._retry_sleep_from_headers(r)
-            if sleep_s is None:
-                sleep_s = backoff
-                backoff = min(backoff * 2.0, 8.0)
-            time.sleep(sleep_s)
+            if r.status_code >= 400:
+                raise MoySkladError(r.status_code, r.text)
 
-        raise MoySkladError(429, "Too Many Requests (retries exceeded)")
+            return r.json()
 
-    def mk_ref(self, entity: str, id_: str) -> Dict[str, Any]:
-        return {
-            "meta": {
-                "href": f"{self.base}/entity/{entity}/{id_}",
-                "type": entity,
-                "mediaType": "application/json",
-            }
-        }
+        raise MoySkladError(429, "rate limit (retries exceeded)")
 
-    def find_by_name(self, entity: str, name: str) -> Dict[str, Any] | None:
-        key = (entity, name)
-        now = time.time()
-        cached = self._find_cache.get(key)
-        if cached and (now - cached[0] < self._find_cache_ttl):
-            return cached[1]
+    # --------- helpers ---------
+    @staticmethod
+    def mk_ref(href: str, type_: str) -> Dict[str, Any]:
+        return {"meta": {"href": href, "type": type_, "mediaType": "application/json"}}
 
+    def find_by_name(self, entity: str, name: str) -> Optional[dict]:
         out = self._get(f"/entity/{entity}", params={"filter": f"name={name}"})
-        rows = out.get("rows", []) or []
-        res = rows[0] if rows else None
-        self._find_cache[key] = (now, res)
-        return res
+        rows = out.get("rows") or []
+        return rows[0] if rows else None
 
-    def get_assortment_by_article(self, article: str) -> Dict[str, Any] | None:
-        if article in self._assortment_by_article:
-            return self._assortment_by_article[article]
+    def get_assortment_by_article(self, article: str) -> Optional[dict]:
+        article = str(article).strip()
+        if not article:
+            return None
+        if article in self._assort_cache:
+            return self._assort_cache[article]
 
         out = self._get("/entity/assortment", params={"filter": f"article={article}"})
-        rows = out.get("rows", []) or []
-        res = rows[0] if rows else None
-        if res:
-            self._assortment_by_article[article] = res
-        return res
+        rows = out.get("rows") or []
+        a = rows[0] if rows else None
+        if a:
+            self._assort_cache[article] = a
+        return a
+
+    def get_product_by_article(self, article: str) -> Optional[dict]:
+        out = self._get("/entity/product", params={"filter": f"article={article}"})
+        rows = out.get("rows") or []
+        return rows[0] if rows else None
+
+    def get_bundle_by_article(self, article: str) -> Optional[dict]:
+        out = self._get("/entity/bundle", params={"filter": f"article={article}"})
+        rows = out.get("rows") or []
+        return rows[0] if rows else None
 
     def get_bundle_components(self, bundle_id: str) -> List[Tuple[Dict[str, Any], float]]:
-        if bundle_id in self._bundle_components_by_id:
-            return self._bundle_components_by_id[bundle_id]
+        """
+        Возвращает [(component_assortment_meta, qty), ...]
 
-        bundle = self._get(f"/entity/bundle/{bundle_id}")
-        comps = (bundle.get("components") or {}).get("rows", []) or []
+        ВАЖНО: /entity/bundle/{id} обычно не содержит components.rows.
+        Нужно ходить в /entity/bundle/{id}/components
+        """
+        out = self._get(f"/entity/bundle/{bundle_id}/components", params={"limit": 1000, "offset": 0})
+        rows = out.get("rows", []) or []
+
         res: List[Tuple[Dict[str, Any], float]] = []
-        for c in comps:
-            res.append((c["assortment"]["meta"], float(c["quantity"])))
-
-        self._bundle_components_by_id[bundle_id] = res
+        for c in rows:
+            assort = c.get("assortment", {})
+            meta = assort.get("meta") if isinstance(assort, dict) else None
+            if not meta or not meta.get("href"):
+                continue
+            qty = float(c.get("quantity") or 0)
+            if qty <= 0:
+                continue
+            res.append((meta, qty))
         return res
 
-    # ----------------------------
-    # Создание документов
-    # ----------------------------
+    def get_sale_price(self, assortment_meta_href: str) -> float:
+        """
+        Дефолтная цена из salePrices[0].value по meta.href сущности.
+        Возвращаем в формате MS (обычно 'копейки*100').
+        """
+        if assortment_meta_href in self._price_cache:
+            return self._price_cache[assortment_meta_href]
+
+        path = assortment_meta_href.split("/api/remap/1.2")[-1]
+        if not path.startswith("/"):
+            path = "/" + path
+
+        obj = self._get(path)
+        prices = obj.get("salePrices") or []
+        val = float((prices[0] or {}).get("value") or 0) if prices else 0.0
+
+        self._price_cache[assortment_meta_href] = val
+        return val
+
+    # --------- create docs ---------
     def create_customerorder(self, body: Dict[str, Any]) -> Dict[str, Any]:
         return self._post("/entity/customerorder", body)
+
+    def create_customer_order(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        # backward compatible name
+        return self.create_customerorder(body)
 
     def create_move(self, body: Dict[str, Any]) -> Dict[str, Any]:
         return self._post("/entity/move", body)
