@@ -68,16 +68,22 @@ def aggregate_ozon_positions(oz: OzonFboClient, bundle_ids: List[str]) -> Dict[s
 def expand_ms_bundles(ms: MoySkladClient, offer_qty: Dict[str, int]) -> Dict[str, float]:
     """
     offer_id(article) -> qty
-    return: assortment.href -> qty
+    return: assortment.href -> qty (ТОЛЬКО components для bundle)
     """
     out: Dict[str, float] = defaultdict(float)
 
     for offer_id, qty in offer_qty.items():
-        # 1) пробуем bundle в МС
-        b = ms.get_bundle_by_article(offer_id)
-        if b:
-            bundle_id = b["id"]
-            comps = ms.get_bundle_components(bundle_id)
+        a = ms.get_assortment_by_article(offer_id)
+        if not a:
+            continue
+
+        a_type = (a.get("meta") or {}).get("type")
+        a_href = (a.get("meta") or {}).get("href")
+        a_id = a.get("id")
+
+        # bundle -> разворачиваем
+        if a_type == "bundle" and a_id:
+            comps = ms.get_bundle_components(a_id)
 
             total_components = 0.0
             for comp_meta, comp_qty in comps:
@@ -85,21 +91,18 @@ def expand_ms_bundles(ms: MoySkladClient, offer_qty: Dict[str, int]) -> Dict[str
                 out[href] += comp_qty * qty
                 total_components += comp_qty * qty
 
-            # спец-исключение
+            # спец-исключение 00233: +00651 = floor(total_components/5)
             if offer_id == "00233":
                 add_qty = math.floor(total_components / 5.0)
                 if add_qty > 0:
-                    p = ms.get_product_by_article("00651") or ms.get_bundle_by_article("00651")
-                    if p:
-                        out[p["meta"]["href"]] += add_qty
+                    extra = ms.get_assortment_by_article("00651")
+                    if extra and (extra.get("meta") or {}).get("href"):
+                        out[extra["meta"]["href"]] += add_qty
             continue
 
-        # 2) обычный product
-        p = ms.get_product_by_article(offer_id)
-        if not p:
-            continue
-
-        out[p["meta"]["href"]] += qty
+        # product (или другой ассорт.) -> берём как есть
+        if a_href:
+            out[a_href] += float(qty)
 
     return dict(out)
 
@@ -160,17 +163,18 @@ def main():
 
                 supplies = o.get("supplies", []) or []
                 bundle_ids = [s.get("bundle_id") for s in supplies if s.get("bundle_id")]
+
                 offer_qty = aggregate_ozon_positions(oz, bundle_ids)
                 ms_qty_by_href = expand_ms_bundles(ms, offer_qty)
                 positions = ms_positions_from_hrefs(ms_qty_by_href)
 
-                # плановая дата (берём timeslot.from, дата важнее времени)
+                # плановая дата (берём timeslot.from; время не важно)
                 delivery_planned = None
                 ts_from = ((o.get("timeslot") or {}).get("timeslot") or {}).get("from")
                 if ts_from:
                     delivery_planned = f"{str(ts_from)[:10]} 00:00:00"
 
-                # комментарий
+                # комментарий: <order_number> - <storage_warehouse.name>
                 wh_name = ""
                 if supplies:
                     wh_name = ((supplies[0].get("storage_warehouse") or {}).get("name") or "")
@@ -179,8 +183,11 @@ def main():
                 # 1) CustomerOrder
                 if cur_state == "READY_TO_SUPPLY" and not st.order_done:
                     if not positions:
+                        # нечего писать в МС
+                        st.last_state = cur_state
+                        state.set(order_number, st)
                         continue
-                    
+
                     body = {
                         "name": order_number,
                         "organization": ms.mk_ref("organization", cfg.org_id),

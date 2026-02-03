@@ -15,26 +15,22 @@ class OzonFboClient:
         self.timeout = timeout
 
     def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
-        r = requests.post(
-            self.base + path,
-            headers=self.headers,
-            json=body,
-            timeout=self.timeout,
-        )
+        delay = 1.0
+        for _ in range(6):
+            r = requests.post(
+                self.base + path,
+                headers=self.headers,
+                json=body,
+                timeout=self.timeout,
+            )
+            if r.status_code != 429:
+                r.raise_for_status()
+                return r.json()
+            time.sleep(delay)
+            delay = min(delay * 2.0, 10.0)
 
-        if r.status_code == 429:
-            # rate limit Ozon — не падаем, даём сервису жить
-            time.sleep(2)
-            return {
-                "items": [],
-                "has_next": False,
-                "last_id": "",
-                "order_ids": [],
-                "orders": [],
-            }
-
-        r.raise_for_status()
-        return r.json()
+        # если прям жёстко лимит — не падаем, но возвращаем пустое
+        return {"items": [], "has_next": False, "last_id": "", "order_ids": [], "orders": []}
 
     def list_order_ids(
         self,
@@ -59,10 +55,7 @@ class OzonFboClient:
     def iter_bundle_items(self, bundle_id: str) -> Iterable[Dict[str, Any]]:
         last_id = ""
         while True:
-            body = {"bundle_ids": [bundle_id], "limit": 100}
-            if last_id:
-                body["last_id"] = last_id
-
+            body = {"bundle_ids": [bundle_id], "limit": 100, "last_id": last_id}
             out = self._post("/v1/supply-order/bundle", body)
 
             for it in out.get("items", []) or []:
@@ -74,5 +67,4 @@ class OzonFboClient:
             nxt = out.get("last_id", "")
             if not nxt or nxt == last_id:
                 break
-
             last_id = nxt
