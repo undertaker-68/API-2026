@@ -137,13 +137,32 @@ def expand_to_products(ms: MS, ms_base: str, offer_qty: dict[str, int]) -> dict[
     return product_qty
 
 
-def build_positions(ms_qty_by_href: dict[str, float]) -> list[dict]:
-    return [
-        {"assortment": {"meta": {"href": href, "type": "product", "mediaType": "application/json"}}, "quantity": q}
-        for href, q in ms_qty_by_href.items()
-        if q > 0
-    ]
+def _ms_type_from_href(href: str) -> str:
+    # href вида .../entity/product/<id> или .../entity/bundle/<id>
+    try:
+        part = href.split("/entity/", 1)[1]
+        t = part.split("/", 1)[0]
+        return t if t else "product"
+    except Exception:
+        return "product"
 
+
+def build_positions(ms_qty_by_href: dict[str, float]) -> list[dict]:
+    positions = []
+    for href, q in ms_qty_by_href.items():
+        if q <= 0:
+            continue
+        positions.append({
+            "assortment": {
+                "meta": {
+                    "href": href,
+                    "type": _ms_type_from_href(href),  # <-- КЛЮЧЕВОЕ
+                    "mediaType": "application/json"
+                }
+            },
+            "quantity": q
+        })
+    return positions
 
 def create_customerorder(ms: MS, ms_base: str, org_id: str, agent_id: str, sales_channel_id: str, name: str,
                          store_id: str, moment: str | None, description: str, positions: list[dict], dry_run: bool):
