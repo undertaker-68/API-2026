@@ -142,6 +142,7 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                                 "positions": positions,
                             })
                             order_id = created["id"]
+                            ms.set_order_reserve(order_id, True)
                             log.info("MS create CustomerOrder posting=%s name=%s positions=%d", posting_number, name, len(positions))
 
                 if not order_id:
