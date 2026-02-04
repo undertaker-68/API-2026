@@ -21,6 +21,8 @@ def get_supplies():
         "filter": {
             "since": _dt_z(since_date, end=False),
             "to": _dt_z(to_date, end=True),
+             "sort_by": "SORT_BY_CREATED_AT",
+             "sort_dir": "SORT_DIR_ASC",
         },
         "limit": 100,
         "offset": 0,
