@@ -92,6 +92,9 @@ class MSClient:
     def _patch(self, path: str, body: dict) -> dict:
         return self._request("PATCH", path, body=body)
 
+    def patch_customer_order(self, order_id: str, body: dict) -> dict:
+        return self._patch(f"/entity/customerorder/{order_id}", body)
+
     # -----------------------------
     # Helpers
     # -----------------------------

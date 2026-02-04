@@ -151,11 +151,8 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
 
                 # --- статус МС
                 if ms_state_id and not cfg.dry_run:
-                    ms.update_customer_order(order_id, {
-                        "state": {"meta": {"href": f"{ms.base}/entity/customerorder/metadata/states/{ms_state_id}", "type": "state"}},
-                        "reserve": True,
-                        "store": {"meta": {"href": f"{ms.base}/entity/store/{cfg.store_ozon_id}", "type": "store"}},
-                    })
+                    ms.set_order_state(order_id, ms_state_id)
+                    ms.set_order_reserve(order_id, True)
 
                 # --- Demand (защита от дублей): создаём один раз при delivering
                 if oz_status == "delivering" and not s.demand_created:
