@@ -19,6 +19,11 @@ def run():
         # игнорируем UNSPEC / DATA_FILLING — они и так не в LIST_STATES
         state = order.get("state")
 
+        # CANCELLED — просто забываем поставку
+        if state == "CANCELLED":
+            log.info(f"Поставка {supply_id} отменена — пропуск")
+            continue
+
         supply = (order.get("supplies") or [None])[0]
         if not supply:
             continue
