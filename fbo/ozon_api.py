@@ -1,43 +1,42 @@
 import requests
 from datetime import datetime, timedelta, date
+
 from config import OZON_BASE_URL, OZON_HEADERS, MIN_CREATED_DATE, DAYS_BACK
+
+
+def _dt_z(d: date, end: bool = False) -> str:
+    # Ozon любит RFC3339 с Z
+    return f"{d.isoformat()}T23:59:59Z" if end else f"{d.isoformat()}T00:00:00Z"
 
 
 def get_supplies():
     url = f"{OZON_BASE_URL}/v3/supply-order/list"
     result = []
 
-    since = max(
-        date.today() - timedelta(days=DAYS_BACK),
-        MIN_CREATED_DATE
-    )
+    today = date.today()
+    since_date = max(today - timedelta(days=DAYS_BACK), MIN_CREATED_DATE)
+    to_date = today
 
     payload = {
         "filter": {
-            "since": since.isoformat(),
-            "states": []
+            "since": _dt_z(since_date, end=False),
+            "to": _dt_z(to_date, end=True),
         },
-        "limit": 1000,
-        "offset": 0
+        "limit": 100,
+        "offset": 0,
     }
 
     while True:
         r = requests.post(url, json=payload, headers=OZON_HEADERS)
-        r.raise_for_status()
+
+        if r.status_code >= 400:
+            # чтобы сразу видеть причину 400
+            raise RuntimeError(f"Ozon {r.status_code}: {r.text}")
+
         data = r.json()
 
-        for order in data.get("orders", []):
-            if not order["order_tags"].get("is_super_fbo"):
-                continue
-
-            created = datetime.fromisoformat(
-                order["created_date"].replace("Z", "")
-            ).date()
-
-            if created < MIN_CREATED_DATE:
-                continue
-
-            result.append(order)
+        orders = data.get("orders", [])
+        result.extend(orders)
 
         if not data.get("has_next"):
             break
@@ -45,7 +44,6 @@ def get_supplies():
         payload["offset"] += payload["limit"]
 
     return result
-
 
 def get_bundle_items(bundle_ids):
     url = f"{OZON_BASE_URL}/v1/supply-order/bundle"
