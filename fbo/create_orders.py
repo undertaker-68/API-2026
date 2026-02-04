@@ -8,11 +8,40 @@ from ozon_api import get_supply_orders_ids, get_supply_orders_info, get_bundle_i
 from ms_api import find_customerorder_by_name, create_customerorder
 from ms_mapper import build_positions
 from logger import log
-
+from datetime import datetime, timedelta, date
 
 def run():
     order_ids = get_supply_orders_ids()
     supplies = get_supply_orders_info(order_ids)
+    MIN_DATE = date(2026, 2, 2)
+    DAYS_BACK = 10
+
+    cutoff_date = max(
+        MIN_DATE,
+        date.today() - timedelta(days=DAYS_BACK)
+    )
+
+    def parse_created_at(value: str) -> date:
+        # Ozon приходит в формате ISO, обычно с Z
+        return datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        ).date()
+
+    before = len(supplies)
+
+    supplies = [
+        s for s in supplies
+        if s.get("created_at")
+        and parse_created_at(s["created_at"]) >= cutoff_date
+    ]
+
+    logger.info(
+        "Фильтр created_at: было %s, осталось %s (cutoff=%s)",
+        before,
+        len(supplies),
+        cutoff_date.isoformat()
+    )
+
     log.info(f"Найдено FBO-поставок: {len(supplies)}")
 
     for order in supplies:
