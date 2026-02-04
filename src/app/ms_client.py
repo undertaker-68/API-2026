@@ -88,6 +88,9 @@ class MSClient:
 
     def _put(self, path: str, body: dict) -> dict:
         return self._request("PUT", path, body=body)
+    
+    def _patch(self, path: str, body: dict) -> dict:
+        return self._request("PATCH", path, body=body)
 
     # -----------------------------
     # Helpers
@@ -123,6 +126,9 @@ class MSClient:
         variants.add(article.replace("—", "-").replace("–", "-"))
         variants.add(self._swap_lookalike_letters(article.replace("—", "-").replace("–", "-")))
         return [v for v in variants if v]
+    
+    def patch_customer_order(self, order_id: str, body: dict) -> dict:
+        return self._patch(f"/entity/customerorder/{order_id}", body)
 
     # -----------------------------
     # CustomerOrder
@@ -149,12 +155,12 @@ class MSClient:
         return self._put(f"/entity/customerorder/{order_id}", body)
 
     def set_order_state(self, order_id: str, state_id: str) -> dict:
-        return self.update_customer_order(order_id, {
+        return self.patch_customer_order(order_id, {
             "state": {"meta": {"href": f"{self.base}/entity/customerorder/metadata/states/{state_id}", "type": "state"}}
         })
 
     def set_order_reserve(self, order_id: str, reserve: bool) -> dict:
-        return self.update_customer_order(order_id, {"reserve": bool(reserve)})
+        return self.patch_customer_order(order_id, {"reserve": bool(reserve)})
 
     # -----------------------------
     # Demand / Move
