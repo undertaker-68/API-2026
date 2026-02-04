@@ -62,13 +62,11 @@ def run():
 
         payload = {
             "name": supply_id,
-            "organization": {"meta": {"type": "organization", "id": ORGANIZATION_ID}},
-            "agent": {"meta": {"type": "counterparty", "id": AGENT_ID}},
-            "salesChannel": {"meta": {"type": "saleschannel", "id": SALES_CHANNEL_FBO_ID}},
-            "state": {"meta": {"type": "state", "id": STATE_FBO_ID}},
-            "store": {"meta": {"type": "store", "id": STORE_ID}},
-            "moment": order["created_date"],
-            "deliveryPlannedMoment": supply["storage_warehouse"]["arrival_date"],
+            "organization": {"meta": {"href": f"https://api.moysklad.ru/api/remap/1.2/entity/organization/{ORGANIZATION_ID}", "type": "organization", "mediaType": "application/json"}},
+            "agent": {"meta": {"href": f"https://api.moysklad.ru/api/remap/1.2/entity/counterparty/{AGENT_ID}", "type": "counterparty", "mediaType": "application/json"}},
+            "salesChannel": {"meta": {"href": f"https://api.moysklad.ru/api/remap/1.2/entity/saleschannel/{SALES_CHANNEL_FBO_ID}", "type": "saleschannel", "mediaType": "application/json"}},
+            "state": {"meta": {"href": f"https://api.moysklad.ru/api/remap/1.2/entity/customerorder/metadata/states/{STATE_FBO_ID}", "type": "state", "mediaType": "application/json"}},
+            "store": {"meta": {"href": f"https://api.moysklad.ru/api/remap/1.2/entity/store/{STORE_ID}", "type": "store", "mediaType": "application/json"}},
             "description": f"{OZON_FBO_MARK}|{supply_id} - {supply['storage_warehouse']['name']}",
             "positions": positions,
         }
