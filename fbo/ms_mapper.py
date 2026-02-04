@@ -24,6 +24,7 @@ def build_positions(items: list[dict]) -> list[dict]:
         a_type = assortment["meta"]["type"]
 
         if a_type == "bundle":
+            # assortment["id"] у bundle — это и есть id комплекта в МС
             components = get_bundle_components(assortment["id"])
 
             for c in components:
@@ -34,14 +35,14 @@ def build_positions(items: list[dict]) -> list[dict]:
                 price = get_sale_price(comp_full)
 
                 positions.append({
-                    "assortment": comp_meta,
+                    "assortment": {"meta": comp_meta},
                     "quantity": comp_qty,
                     "price": price,
                 })
         else:
             price = get_sale_price(assortment)
             positions.append({
-                "assortment": assortment["meta"],
+                "assortment": {"meta": assortment["meta"]},
                 "quantity": qty,
                 "price": price,
             })
