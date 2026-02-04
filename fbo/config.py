@@ -7,9 +7,12 @@ MS_TOKEN = os.environ["MS_TOKEN"].strip()
 
 ORGANIZATION_ID = os.getenv("MS_ORG_ID", "12d36dcd-8b6c-11e9-9109-f8fc00176e21")
 AGENT_ID = os.getenv("MS_AGENT_ID", "f61bfcf9-2d74-11ec-0a80-04c700041e03")
+
+# FBO-specific (обязательные)
 SALES_CHANNEL_FBO_ID = os.environ["MS_SALES_CHANNEL_FBO_ID"].strip()
 STATE_FBO_ID = os.environ["MS_FBO_STATE_ID"].strip()
 
+# фиксированный склад (если не задан — дефолт)
 STORE_ID = os.getenv("MS_FBO_STORE_ID", "42db7535-5bb6-11ef-0a80-1589000daaa3")
 
 MS_HEADERS = {
@@ -30,8 +33,8 @@ OZON_HEADERS = {
 }
 
 # ===== Ограничения =====
-MIN_CREATED_DATE = date(2026, 2, 2)
-DAYS_BACK = 10
+MIN_CREATED_DATE = date(2026, 2, 2)   # не ранее
+DAYS_BACK = 10                        # за последние N дней
 
 # ===== Runtime =====
 DRY_RUN = os.getenv("FBO_DRY_RUN", "1").strip() not in ("0", "false", "False")

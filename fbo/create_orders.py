@@ -4,7 +4,7 @@ from config import (
     STORE_ID,
     DRY_RUN, OZON_FBO_MARK
 )
-from ozon_api import get_supply_orders_ids, get_supply_orders_info, get_bundle_items
+from ozon_api import get_supply_orders_ids, get_supply_orders_info, get_bundle_items, STATE_CODE
 from ms_api import find_customerorder_by_name, create_customerorder
 from ms_mapper import build_positions
 from logger import log
@@ -16,24 +16,41 @@ def run():
     log.info(f"Найдено FBO-поставок: {len(supplies)}")
 
     for order in supplies:
-        supply = order["supplies"][0]
+        # игнорируем UNSPEC / DATA_FILLING — они и так не в LIST_STATES
+        state = order.get("state")
+
+        supply = (order.get("supplies") or [None])[0]
+        if not supply:
+            continue
+
         supply_id = str(supply["supply_id"])
 
-        log.info(f"Обработка поставки {supply_id}")
+        # правила на будущее по статусам:
+        # - READY_TO_SUPPLY -> создать CustomerOrder
+        # - READY -> CANCELLED -> забыть (пока просто не создаём)
+        # - READY -> другое -> Demand (потом)
+
+        if state != "READY_TO_SUPPLY":
+            # пока только создание заказов по READY
+            continue
 
         existing = find_customerorder_by_name(supply_id)
         if existing:
-            desc = existing.get("description", "")
+            desc = existing.get("description", "") or ""
             if OZON_FBO_MARK in desc:
                 log.info(f"Заказ {supply_id} уже создан нами — пропуск")
             else:
                 log.warning(f"Заказ {supply_id} существует без метки — пропуск")
             continue
 
-        items = get_bundle_items([supply["bundle_id"]])
-        log.debug(f"Ozon позиции: {items}")
+        bundle_id = supply.get("bundle_id")
+        if not bundle_id:
+            log.warning(f"Нет bundle_id для {supply_id}")
+            continue
 
+        items = get_bundle_items([bundle_id])
         positions = build_positions(items)
+
         if not positions:
             log.warning(f"Нет позиций для {supply_id}")
             continue

@@ -15,17 +15,17 @@ STATE_CODE = {
     "OVERDUE": 11,
 }
 
-# какие статусы нам нужны
-LIST_STATES_READY = [STATE_CODE["READY_TO_SUPPLY"]]
-LIST_STATES_AFTER_READY = [
+# пока тянем всё, но UNSPEC/DATA_FILLING не используем вообще
+LIST_STATES = [
+    STATE_CODE["READY_TO_SUPPLY"],
     STATE_CODE["ACCEPTED_AT_SUPPLY_WAREHOUSE"],
     STATE_CODE["IN_TRANSIT"],
     STATE_CODE["ACCEPTANCE_AT_STORAGE_WAREHOUSE"],
     STATE_CODE["COMPLETED"],
     STATE_CODE["REJECTED_AT_SUPPLY_WAREHOUSE"],
+    STATE_CODE["CANCELLED"],
     STATE_CODE["OVERDUE"],
 ]
-LIST_STATES_CANCELLED = [STATE_CODE["CANCELLED"]]
 
 
 def _dt_utc_z(d: date, end: bool = False) -> str:
@@ -43,13 +43,12 @@ def _list_by_states(states: list[int]) -> list[int]:
         "filter": {
             "since": _dt_utc_z(since_date, end=False),
             "to": _dt_utc_z(to_date, end=True),
-            "states": states,     # ОБЯЗАТЕЛЬНО и только числа
+            "states": states,  # обязательно, числовые
         },
         "limit": 100,
         "last_id": "",
-        "offset": 0,
-        "sort_by": 1,            # валидно, проверили
-        "sort_dir": 2,           # DESC, иначе ругается на архив
+        "sort_by": 1,   # проверено: валидно
+        "sort_dir": 2,  # DESC: иначе ругается на архивные статусы
     }
 
     ids: list[int] = []
@@ -71,16 +70,9 @@ def _list_by_states(states: list[int]) -> list[int]:
     return ids
 
 
-def get_supply_orders_ids():
-    """
-    Возвращаем order_id всех поставок по нужным статусам (ready + after_ready + cancelled)
-    за последние DAYS_BACK дней, но не ранее MIN_CREATED_DATE.
-    """
-    ids = []
-    ids.extend(_list_by_states(LIST_STATES_READY))
-    ids.extend(_list_by_states(LIST_STATES_AFTER_READY))
-    ids.extend(_list_by_states(LIST_STATES_CANCELLED))
-    # убираем дубли, сохраняем порядок
+def get_supply_orders_ids() -> list[int]:
+    ids = _list_by_states(LIST_STATES)
+    # дедуп с сохранением порядка
     seen = set()
     out = []
     for x in ids:
@@ -89,32 +81,27 @@ def get_supply_orders_ids():
             out.append(x)
     return out
 
-def get_supply_orders_info(order_ids: list[int]):
-    url = f"{OZON_BASE_URL}/v3/supply-order/get"
-    result = []
 
-    CHUNK = 50  # безопасный размер
+def get_supply_orders_info(order_ids: list[int]) -> list[dict]:
+    url = f"{OZON_BASE_URL}/v3/supply-order/get"
+    result: list[dict] = []
+
+    CHUNK = 50  # ограничение /get
 
     for i in range(0, len(order_ids), CHUNK):
         chunk = order_ids[i:i + CHUNK]
-
-        r = requests.post(
-            url,
-            headers=OZON_HEADERS,
-            json={"order_ids": chunk},
-        )
+        r = requests.post(url, headers=OZON_HEADERS, json={"order_ids": chunk})
 
         if r.status_code >= 400:
-            raise RuntimeError(
-                f"Ozon {r.status_code}: {r.text} | order_ids={chunk}"
-            )
+            raise RuntimeError(f"Ozon {r.status_code}: {r.text} | order_ids={chunk}")
 
         data = r.json()
-        result.extend(data.get("orders", []))
+        result.extend(data.get("orders", []) or [])
 
     return result
 
-def get_bundle_items(bundle_ids):
+
+def get_bundle_items(bundle_ids: list[str]) -> list[dict]:
     url = f"{OZON_BASE_URL}/v1/supply-order/bundle"
     r = requests.post(
         url,
@@ -122,4 +109,5 @@ def get_bundle_items(bundle_ids):
         json={"bundle_ids": bundle_ids, "limit": 100},
     )
     r.raise_for_status()
-    return r.json()["items"]
+    data = r.json()
+    return data.get("items", []) or []
