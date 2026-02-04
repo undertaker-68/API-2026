@@ -12,7 +12,7 @@ from .settings import (
     MOVE_STATE_ID, DEMAND_STATE_ID,
     STATE_READY_TO_SUPPLY, STATE_CANCELLED,
 )
-from .ozon_fbo import OzonFbo
+from .ozon_fbo import OzonFboClient
 from .ms_api import MoySkladClient, MoySkladError
 from .state import StateStore, SupplyState
 
@@ -50,7 +50,7 @@ def load_cfg_from_env() -> Cfg:
 def iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-def aggregate_ozon_positions(oz: OzonFbo, bundle_ids: List[str]) -> Dict[str, int]:
+def aggregate_ozon_positions(oz: OzonFboClient, bundle_ids: List[str]) -> Dict[str, int]:
     # offer_id -> qty
     agg: Dict[str, int] = defaultdict(int)
     for bid in bundle_ids:
@@ -114,14 +114,18 @@ def ms_positions_from_hrefs(ms_qty_by_href: Dict[str, float]) -> List[Dict[str, 
 
 def main():
     cfg = load_cfg_from_env()
-    oz = OzonFbo(cfg.ozon_client_id, cfg.ozon_api_key)
+    oz = OzonFboClient(cfg.ozon_client_id, cfg.ozon_api_key)
     ms = MoySkladClient(cfg.ms_base_url, cfg.ms_token)
     state = StateStore(path=os.path.join(os.path.dirname(__file__), "state.json"))
 
     while True:
         now = datetime.now(timezone.utc)
         w = calc_window(now)
-        since, to = iso(w.since), iso(w.to)
+        # calc_window() может возвращать либо объект с полями since/to, либо кортеж (since, to)
+        if isinstance(w, tuple):
+            since, to = iso(w[0]), iso(w[1])
+        else:
+            since, to = iso(w.since), iso(w.to)
 
         # Берём кандидатов: READY и CANCELLED (для переходов)
         ids = set()
