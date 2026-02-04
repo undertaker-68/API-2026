@@ -46,6 +46,7 @@ def _list_by_states(states: list[int]) -> list[int]:
             "states": states,     # ОБЯЗАТЕЛЬНО и только числа
         },
         "limit": 100,
+        "last_id": "",
         "offset": 0,
         "sort_by": 1,            # валидно, проверили
         "sort_dir": 2,           # DESC, иначе ругается на архив
@@ -61,10 +62,11 @@ def _list_by_states(states: list[int]) -> list[int]:
         data = r.json()
         ids.extend(data.get("order_ids", []) or [])
 
-        if not data.get("last_id"):
+        last_id = data.get("last_id") or ""
+        if not last.id:
             break
 
-        payload["offset"] += payload["limit"]
+        payload["last_id"] = last_id
 
     return ids
 
