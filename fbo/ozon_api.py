@@ -63,7 +63,7 @@ def _list_by_states(states: list[int]) -> list[int]:
         ids.extend(data.get("order_ids", []) or [])
 
         last_id = data.get("last_id") or ""
-        if not last.id:
+        if not last_id:
             break
 
         payload["last_id"] = last_id
