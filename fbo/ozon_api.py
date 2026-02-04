@@ -89,13 +89,30 @@ def get_supply_orders_ids():
             out.append(x)
     return out
 
-
 def get_supply_orders_info(order_ids: list[int]):
     url = f"{OZON_BASE_URL}/v3/supply-order/get"
-    r = requests.post(url, headers=OZON_HEADERS, json={"order_ids": order_ids})
-    r.raise_for_status()
-    return r.json()["orders"]
+    result = []
 
+    CHUNK = 50  # безопасный размер
+
+    for i in range(0, len(order_ids), CHUNK):
+        chunk = order_ids[i:i + CHUNK]
+
+        r = requests.post(
+            url,
+            headers=OZON_HEADERS,
+            json={"order_ids": chunk},
+        )
+
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"Ozon {r.status_code}: {r.text} | order_ids={chunk}"
+            )
+
+        data = r.json()
+        result.extend(data.get("orders", []))
+
+    return result
 
 def get_bundle_items(bundle_ids):
     url = f"{OZON_BASE_URL}/v1/supply-order/bundle"
