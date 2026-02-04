@@ -26,8 +26,9 @@ def _request(method: str, url: str, *, json: dict | None = None,
             delay = min(delay * 2, 8.0)
             continue
 
-        # прочие — сразу
-        r.raise_for_status()
+        # прочие — сразу, но с телом ошибки
+        raise RuntimeError(f"MS {method} {url} failed: {r.status_code} {r.text}")
+
 
     raise RuntimeError(f"MS {method} failed after retries: url={url} last={last_err}")
 
