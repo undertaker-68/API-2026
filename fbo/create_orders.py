@@ -4,14 +4,15 @@ from config import (
     STORE_ID,
     DRY_RUN, OZON_FBO_MARK
 )
-from ozon_api import get_supplies, get_bundle_items
+from ozon_api import get_supply_orders_ids, get_supply_orders_info, get_bundle_items
 from ms_api import find_customerorder_by_name, create_customerorder
 from ms_mapper import build_positions
 from logger import log
 
 
 def run():
-    supplies = get_supplies()
+    order_ids = get_supply_orders_ids()
+    supplies = get_supply_orders_info(order_ids)
     log.info(f"Найдено FBO-поставок: {len(supplies)}")
 
     for order in supplies:
