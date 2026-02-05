@@ -3,12 +3,12 @@ import logging
 import time
 from dotenv import load_dotenv
 
-from app.logging_setup import setup_logging
-from app.config import load_config
-from app.state_store import StateStore
-from app.ozon_client import OzonClient
-from app.ms_client import MSClient
-from app.sync_orders import run_once
+from src.app.logging_setup import setup_logging
+from src.app.config import load_config
+from src.app.state_store import StateStore
+from src.app.ozon_client import OzonClient
+from src.app.ms_client import MSClient
+from src.app.sync_orders import run_once
 
 log = logging.getLogger("main")
 

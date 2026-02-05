@@ -1,6 +1,6 @@
 import logging
 
-from app.ms_client import MSClient
+from src.app.ms_client import MSClient
 
 log = logging.getLogger("bundle")
 
@@ -47,6 +47,7 @@ def expand_offer(ms: MSClient, offer_id: str, qty: int) -> list[dict]:
         pos["price"] = price
 
     return [pos]
+
 
 def _expand_bundle(ms: MSClient, bundle: dict, qty: int) -> list[dict]:
     comps = bundle.get("components") or {}

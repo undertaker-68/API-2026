@@ -1,12 +1,12 @@
 import logging
 from datetime import datetime, timedelta, timezone, date
 
-from app.config import Config
-from app.ozon_client import OzonClient
-from app.ms_client import MSClient
-from app.state_store import StateStore, OrderState
-from app.mappers import ms_state_id_for_ozon_status
-from app.bundle_expand import expand_offer
+from src.app.config import Config
+from src.app.ozon_client import OzonClient
+from src.app.ms_client import MSClient
+from src.app.state_store import StateStore, OrderState
+from src.app.mappers import ms_state_id_for_ozon_status
+from src.app.bundle_expand import expand_offer
 
 log = logging.getLogger("sync")
 
