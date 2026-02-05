@@ -72,6 +72,32 @@ class MSClient:
             if r.get("name") == name:
                 return r
         return None
+    
+    def find_assortment_by_article_search_exact(self, article: str) -> Optional[dict]:
+        article = (article or "").strip()
+        if not article:
+            return None
+
+        offset = 0
+        limit = 100
+
+        while True:
+            res = self._get("/entity/assortment", params={
+                "search": article,
+                "limit": limit,
+                "offset": offset,
+            })
+            rows = res.get("rows") or []
+
+            for r in rows:
+                if (r.get("article") or "").strip() == article:
+                    return r
+
+            if len(rows) < limit:
+                break
+            offset += limit
+
+        return None
 
     def get_customer_order(self, order_id: str) -> dict:
         return self._get(f"/entity/customerorder/{order_id}")
@@ -80,11 +106,11 @@ class MSClient:
         return self._post("/entity/customerorder", body)
 
     def set_order_state(self, order_id: str, state_id: str) -> dict:
-        return self._patch(f"/entity/customerorder/{order_id}", {
+        return self._put(f"/entity/customerorder/{order_id}", {
             "state": {
                 "meta": {
                     "href": f"{self.base}/entity/customerorder/metadata/states/{state_id}",
-                    "type": "state",
+                    "type": "state"
                 }
             }
         })
