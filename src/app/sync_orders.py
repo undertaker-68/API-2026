@@ -16,17 +16,26 @@ OZON_MARK = "ozon"  # метка в description
 def iso_z(d: datetime) -> str:
     return d.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-
 def compute_cutoff_window(since_date: str, days_back: int = 7, days_forward: int = 0) -> tuple[str, str]:
-    since = date.fromisoformat(since_date)
+    # защита от пустого/битого since_date, чтобы Ozon не падал с Timestamp ""
+    try:
+        s = (since_date or "").strip()
+        if not s:
+            raise ValueError("empty since_date")
+        since = date.fromisoformat(s)
+    except Exception:
+        # если нет даты — берём последние 7 дней от сегодня (UTC)
+        today = datetime.now(timezone.utc).date()
+        since = today - timedelta(days=days_back)
+
     today = datetime.now(timezone.utc).date()
     start = max(since, today - timedelta(days=days_back))
     end = today + timedelta(days=days_forward)
+
     return (
         iso_z(datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)),
         iso_z(datetime.combine(end, datetime.max.time(), tzinfo=timezone.utc)),
     )
-
 
 def build_ms_positions(ms: MSClient, ozon_products: list[dict], posting_number: str) -> list[dict]:
     """
