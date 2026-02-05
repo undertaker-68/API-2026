@@ -94,6 +94,9 @@ def _parse_dt(value: str) -> datetime | None:
     except Exception:
         return None
 
+def chunks(lst, size):
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
 
 def get_supply_orders_info(order_ids: list[int], date_from: datetime | None = None) -> list[dict]:
     """
