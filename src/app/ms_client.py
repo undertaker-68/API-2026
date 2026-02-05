@@ -61,6 +61,7 @@ class MSClient:
         return self._request("PUT", path, body=body)
 
     def _patch(self, path: str, body: dict) -> dict:
+        # ВАЖНО: для customerorder PATCH у тебя НЕ поддерживается (1039).
         return self._request("PATCH", path, body=body)
 
     # -----------------------------
@@ -72,7 +73,8 @@ class MSClient:
             if r.get("name") == name:
                 return r
         return None
-    
+
+    # нужно для bundle_expand.py
     def find_assortment_by_article_search_exact(self, article: str) -> Optional[dict]:
         article = (article or "").strip()
         if not article:
@@ -105,6 +107,7 @@ class MSClient:
     def create_customer_order(self, body: dict) -> dict:
         return self._post("/entity/customerorder", body)
 
+    # !!! PATCH нельзя, используем PUT
     def set_order_state(self, order_id: str, state_id: str) -> dict:
         return self._put(f"/entity/customerorder/{order_id}", {
             "state": {
@@ -116,7 +119,7 @@ class MSClient:
         })
 
     # -----------------------------
-    # REAL reserve (positions[].reserve)
+    # REAL reserve (positions[].reserve) - то что ты делал reserve.py
     # -----------------------------
     def get_customer_order_positions(self, order_id: str) -> list[dict]:
         o = self._get(f"/entity/customerorder/{order_id}", params={"expand": "positions"})

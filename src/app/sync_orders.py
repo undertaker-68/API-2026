@@ -16,6 +16,7 @@ OZON_MARK = "ozon"  # метка в description
 def iso_z(d: datetime) -> str:
     return d.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
+
 def compute_cutoff_window(since_date: str, days_back: int = 7, days_forward: int = 0) -> tuple[str, str]:
     # защита от пустого/битого since_date, чтобы Ozon не падал с Timestamp ""
     try:
@@ -24,7 +25,6 @@ def compute_cutoff_window(since_date: str, days_back: int = 7, days_forward: int
             raise ValueError("empty since_date")
         since = date.fromisoformat(s)
     except Exception:
-        # если нет даты — берём последние 7 дней от сегодня (UTC)
         today = datetime.now(timezone.utc).date()
         since = today - timedelta(days=days_back)
 
@@ -37,13 +37,8 @@ def compute_cutoff_window(since_date: str, days_back: int = 7, days_forward: int
         iso_z(datetime.combine(end, datetime.max.time(), tzinfo=timezone.utc)),
     )
 
+
 def build_ms_positions(ms: MSClient, ozon_products: list[dict], posting_number: str) -> list[dict]:
-    """
-    ВАЖНО:
-      - сопоставление offer_id -> article (МС)
-      - bundle разворачиваем
-      - если позиция не сматчилась — пропускаем позицию, заказ НЕ дропаем целиком
-    """
     positions: list[dict] = []
     for p in ozon_products:
         offer_id = str(p.get("offer_id") or "").strip()
@@ -62,10 +57,6 @@ def build_ms_positions(ms: MSClient, ozon_products: list[dict], posting_number: 
 
 
 def ensure_order(ms: MSClient, posting_number: str) -> tuple[str | None, str]:
-    """
-    1) Если заказ с name=posting_number есть и это НАШ Ozon (по description) — возвращаем id и creation skip.
-    2) Если name совпал, но это не наш Ozon — создаём с постфиксом er/er2/...
-    """
     found = ms.find_customer_order_by_name(posting_number)
     if found:
         oid = found["id"]
@@ -91,7 +82,6 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
     cutoff_from, cutoff_to = compute_cutoff_window(since_date, days_back=7, days_forward=0)
     log.info("sync CUT window %s .. %s", cutoff_from, cutoff_to)
 
-    # ===== АКТИВНЫЕ СТАТУСЫ =====
     for status in ("awaiting_packaging", "awaiting_deliver", "delivering"):
         try:
             resp = ozon.unfulfilled_list(cutoff_from, cutoff_to, status=status, limit=50, offset=0)
@@ -124,16 +114,12 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                 ms_state_id = ms_state_id_for_ozon_status(oz_status, initiator)
                 order_id = s.ms_order_id
 
-                # --- создание заказа (если его нет) — для awaiting_* и даже delivering (бывают кейсы)
                 if not order_id and oz_status in ("awaiting_packaging", "awaiting_deliver", "delivering"):
                     existing_id, name = ensure_order(ms, posting_number)
                     if existing_id:
                         order_id = existing_id
                     else:
                         positions = build_ms_positions(ms, posting.get("products") or [], posting_number)
-
-                        # если вообще ничего не сматчилось — НЕ забываем (чтобы добить после починки артикула),
-                        # просто не создаём пустой заказ.
                         if not positions:
                             log.warning("MS skip create CustomerOrder posting=%s: positions=0 (all products unmapped)", posting_number)
                             store.upsert(OrderState(posting_number, None, oz_status, s.demand_created, s.move_created, 0, now_ts, 0))
@@ -150,7 +136,6 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                                 "positions": positions,
                             })
                             order_id = created["id"]
-                            # РЕАЛЬНЫЙ резерв (positions[].reserve = quantity)
                             ms.set_positions_reserve_all(order_id, True)
                             log.info("MS create CustomerOrder posting=%s name=%s positions=%d", posting_number, name, len(positions))
 
@@ -158,16 +143,12 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                     store.upsert(OrderState(posting_number, None, oz_status, s.demand_created, s.move_created, 0, now_ts, 0))
                     continue
 
-                # --- статус МС + дожим резерва по позициям
                 if ms_state_id and not cfg.dry_run:
                     ms.set_order_state(order_id, ms_state_id)
                     ms.set_positions_reserve_all(order_id, True)
 
-                # --- Demand (защита от дублей): создаём один раз при delivering
                 if oz_status == "delivering" and not s.demand_created:
                     positions = build_ms_positions(ms, posting.get("products") or [], posting_number)
-
-                    # если не удалось собрать позиции — считаем ошибкой сопоставления, не создаём Demand и не забываем
                     if not positions:
                         log.warning("MS skip create Demand posting=%s: positions=0 (unmapped) -> will retry", posting_number)
                     else:
@@ -184,23 +165,15 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                             except Exception as e:
                                 msg = str(e)
                                 log.error("MS create Demand failed posting=%s: %s", posting_number, msg)
-
-                                # нет остатков — пропускаем и забываем
                                 if "3007" in msg or "нет на складе" in msg.lower():
                                     log.warning("MS Demand blocked by stock, FORGET posting=%s", posting_number)
-                                    store.upsert(OrderState(
-                                        posting_number, order_id, oz_status,
-                                        0, s.move_created, 1,  # forgotten = 1
-                                        now_ts, 0
-                                    ))
+                                    store.upsert(OrderState(posting_number, order_id, oz_status, 0, s.move_created, 1, now_ts, 0))
                                     continue
-
-                                # прочие ошибки — оставляем на повтор
                                 store.upsert(OrderState(posting_number, order_id, oz_status, 0, s.move_created, 0, now_ts, 0))
                                 continue
 
                         s.demand_created = 1
-                        s.forgotten = 1  # по твоему правилу: delivering->(создали demand)->забываем
+                        s.forgotten = 1
 
                 store.upsert(OrderState(
                     posting_number, order_id, oz_status,
@@ -212,7 +185,6 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                 log.error("posting=%s failed: %s", posting_number, e, exc_info=True)
                 continue
 
-    # ===== FINALIZE (пропал из active) =====
     for st in store.iter_active():
         if st.posting_number in seen_now or st.forgotten:
             continue
@@ -239,12 +211,10 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                 store.upsert(st)
                 continue
 
-            # обновим статус в МС (если нужно)
             if ms_state_id and not cfg.dry_run:
                 ms.set_order_state(order_id, ms_state_id)
 
             if oz_status == "cancelled":
-                # CLIENT/OZON: снять резерв по позициям и забыть
                 if initiator in ("client", "ozon"):
                     if not cfg.dry_run:
                         ms.set_positions_reserve_all(order_id, False)
@@ -252,7 +222,6 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                     store.upsert(st)
                     continue
 
-                # SELLER: снять резерв и сделать Move (если не делали)
                 if initiator == "seller":
                     if not cfg.dry_run:
                         ms.set_positions_reserve_all(order_id, False)
