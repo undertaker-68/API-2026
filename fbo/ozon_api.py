@@ -82,23 +82,47 @@ def get_supply_orders_ids() -> list[int]:
     return out
 
 
-def get_supply_orders_info(order_ids: list[int]) -> list[dict]:
-    url = f"{OZON_BASE_URL}/v3/supply-order/get"
-    result: list[dict] = []
+def _parse_dt(value: str) -> datetime | None:
+    """Parse Ozon datetime strings (ISO8601)."""
+    if not value:
+        return None
+    s = value.strip()
+    try:
+        if s.endswith("Z"):
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
 
-    CHUNK = 50  # ограничение /get
 
-    for i in range(0, len(order_ids), CHUNK):
-        chunk = order_ids[i:i + CHUNK]
-        r = requests.post(url, headers=OZON_HEADERS, json={"order_ids": chunk})
+def get_supply_orders_info(order_ids: list[int], date_from: datetime | None = None) -> list[dict]:
+    """
+    Fetch details for supply orders.
+    If date_from is provided and list endpoint returns newest-first, we stop early
+    once a whole chunk is older than date_from.
+    """
+    out: list[dict] = []
+    for chunk in chunks(order_ids, 50):
+        payload = {"supply_order_ids": chunk}
+        r = _request("POST", "/v3/supply-order/get", json=payload)
+        items = r.json().get("result") or []
 
-        if r.status_code >= 400:
-            raise RuntimeError(f"Ozon {r.status_code}: {r.text} | order_ids={chunk}")
+        kept: list[dict] = []
+        old_cnt = 0
+        for it in items:
+            created_raw = it.get("created_at") or it.get("created_date")
+            dt = _parse_dt(created_raw) if isinstance(created_raw, str) else None
+            if date_from and dt and dt < date_from:
+                old_cnt += 1
+                continue
+            kept.append(it)
 
-        data = r.json()
-        result.extend(data.get("orders", []) or [])
+        out.extend(kept)
 
-    return result
+        if date_from and items and old_cnt == len(items):
+            break
+
+    return out
 
 
 def get_bundle_items(bundle_ids: list[str]) -> list[dict]:
