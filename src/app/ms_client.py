@@ -9,7 +9,10 @@ log = logging.getLogger("ms")
 
 class MSClient:
     """
-    Минимальный клиент МойСклад REMAP 1.2
+    Клиент МойСклад REMAP 1.2
+    ВАЖНО по твоему аккаунту:
+      - PATCH для /entity/customerorder/{id} НЕ поддерживается (1039) -> используем PUT
+      - "резерв" делаем через positions[].reserve (как в твоём reserve.py)
     """
 
     def __init__(self, cfg_or_token: Config | str, base: str | None = None):
@@ -60,8 +63,8 @@ class MSClient:
     def _put(self, path: str, body: dict) -> dict:
         return self._request("PUT", path, body=body)
 
+    # оставляю на будущее (но НЕ для customerorder)
     def _patch(self, path: str, body: dict) -> dict:
-        # ВАЖНО: для customerorder PATCH у тебя НЕ поддерживается (1039).
         return self._request("PATCH", path, body=body)
 
     # -----------------------------
@@ -74,7 +77,26 @@ class MSClient:
                 return r
         return None
 
-    # нужно для bundle_expand.py
+    def get_customer_order(self, order_id: str) -> dict:
+        return self._get(f"/entity/customerorder/{order_id}")
+
+    def create_customer_order(self, body: dict) -> dict:
+        return self._post("/entity/customerorder", body)
+
+    # !!! PATCH не поддерживается -> PUT
+    def set_order_state(self, order_id: str, state_id: str) -> dict:
+        return self._put(f"/entity/customerorder/{order_id}", {
+            "state": {
+                "meta": {
+                    "href": f"{self.base}/entity/customerorder/metadata/states/{state_id}",
+                    "type": "state",
+                }
+            }
+        })
+
+    # -----------------------------
+    # Assortment helpers (bundle_expand.py)
+    # -----------------------------
     def find_assortment_by_article_search_exact(self, article: str) -> Optional[dict]:
         article = (article or "").strip()
         if not article:
@@ -101,25 +123,52 @@ class MSClient:
 
         return None
 
-    def get_customer_order(self, order_id: str) -> dict:
-        return self._get(f"/entity/customerorder/{order_id}")
+    def get_sale_price(self, assortment: dict) -> Optional[int]:
+        """
+        Возвращает "цену продажи" (как integer value из МС), если есть.
+        Берём первую найденную salePrices[].value.
+        """
+        if not assortment:
+            return None
 
-    def create_customer_order(self, body: dict) -> dict:
-        return self._post("/entity/customerorder", body)
+        prices = assortment.get("salePrices")
+        if isinstance(prices, list) and prices:
+            for p in prices:
+                v = p.get("value")
+                if v is not None:
+                    try:
+                        return int(v)
+                    except Exception:
+                        pass
+        return None
 
-    # !!! PATCH нельзя, используем PUT
-    def set_order_state(self, order_id: str, state_id: str) -> dict:
-        return self._put(f"/entity/customerorder/{order_id}", {
-            "state": {
-                "meta": {
-                    "href": f"{self.base}/entity/customerorder/metadata/states/{state_id}",
-                    "type": "state"
-                }
-            }
-        })
+    def try_get_bundle_by_article(self, article: str) -> Optional[dict]:
+        """
+        Ищет bundle по article (точное совпадение). Возвращает bundle с components (через get_bundle()).
+        """
+        article = (article or "").strip()
+        if not article:
+            return None
+
+        res = self._get("/entity/bundle", params={"search": article, "limit": 100, "offset": 0})
+        rows = res.get("rows") or []
+        for r in rows:
+            if (r.get("article") or "").strip() == article:
+                meta = (r.get("meta") or {})
+                href = (meta.get("href") or "")
+                bid = href.rstrip("/").split("/")[-1]
+                if not bid:
+                    return r
+                return self.get_bundle(bid)
+
+        return None
+
+    def get_bundle(self, bundle_id: str) -> dict:
+        # expand=components чтобы были компоненты
+        return self._get(f"/entity/bundle/{bundle_id}", params={"expand": "components"})
 
     # -----------------------------
-    # REAL reserve (positions[].reserve) - то что ты делал reserve.py
+    # REAL reserve (positions[].reserve)
     # -----------------------------
     def get_customer_order_positions(self, order_id: str) -> list[dict]:
         o = self._get(f"/entity/customerorder/{order_id}", params={"expand": "positions"})
