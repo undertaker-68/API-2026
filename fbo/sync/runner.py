@@ -43,7 +43,7 @@ def run_once(cfg: Config) -> None:
     log.info("Window: %s .. %s", iso_z(since), iso_z(to))
 
     # list_supplies теперь ждёт datetime UTC
-    supplies = oz_api.list_supplies(since, to)
+    supplies = oz_api.list_supply_orders(since, to)
 
     log.info("Fetched supplies: %d", len(supplies))
 
@@ -80,8 +80,9 @@ def run_once(cfg: Config) -> None:
             continue
 
         # 2) Берём состав поставки
-        bundle_items = oz_api.bundle(supply_order_id)
-        items = oz_api.extract_items(bundle_items)
+        bundle_items = oz_api.get_supply_items(supply_order_id)
+        items = oz_api.extract_items_from_bundle_items(bundle_items)
+
         if not items:
             rec["skip_reason"] = "no_items"
             log.info("No items for supply %s, skip create", number)

@@ -9,7 +9,6 @@ from fbo.ozon.client import OzonClient
 # Коды статусов (то, что ты уже собрал)
 STATES_ALL = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
-# (опционально) человекочитаемые имена — для логов/state
 STATE_NAME = {
     1: "valid(no_orders)",
     2: "READY_TO_SUPPLY",
@@ -38,12 +37,11 @@ class OzonSuppliesApi:
     def __init__(self, client: OzonClient):
         self.client = client
 
-    def list_supplies(self, from_utc: datetime, to_utc_ex: datetime, limit: int = 100) -> List[Dict[str, Any]]:
+    def list_supply_orders(self, from_utc: datetime, to_utc_ex: datetime, limit: int = 100) -> List[Dict[str, Any]]:
         """
-        Рабочая схема v3 (как у тебя):
-        1) list -> order_ids + last_id
-        2) get  -> orders (created_date есть тут)
-        Фильтр по времени делаем по orders.created_date.
+        Возвращает orders (деталка) в окне дат:
+        list -> order_ids + last_id
+        get  -> orders (created_date)
         """
         last_id = None
         result: List[Dict[str, Any]] = []
@@ -65,7 +63,6 @@ class OzonSuppliesApi:
 
             min_created_page: Optional[datetime] = None
 
-            # батчи по 50
             for i in range(0, len(order_ids), 50):
                 chunk = order_ids[i : i + 50]
                 details = self.client.post("/v3/supply-order/get", {"order_ids": chunk})
@@ -90,7 +87,7 @@ class OzonSuppliesApi:
             if not last_id:
                 break
 
-        # без дублей (на всякий)
+        # дедуп
         seen = set()
         out: List[Dict[str, Any]] = []
         for o in sorted(result, key=lambda x: (x.get("created_date", ""), x.get("order_number", ""))):
@@ -101,12 +98,60 @@ class OzonSuppliesApi:
             out.append(o)
         return out
 
-    def bundle(self, supply_order_id: int) -> List[Dict[str, Any]]:
-        # как и раньше — состав поставки
-        data = self.client.post("/v1/supply-order/bundle", {"supply_order_id": supply_order_id})
-        result = data.get("result") or {}
-        items = result.get("items") or result.get("products") or result.get("rows") or []
-        return items if isinstance(items, list) else []
+    # -------- bundle ids extraction / bundle items --------
+
+    @staticmethod
+    def extract_bundle_ids(obj: Any) -> List[str]:
+        bundle_ids: set[str] = set()
+
+        def walk(x: Any) -> None:
+            if isinstance(x, dict):
+                for k, v in x.items():
+                    if k in ("bundle_id", "restricted_bundle_id") and isinstance(v, str) and v:
+                        bundle_ids.add(v)
+                    walk(v)
+            elif isinstance(x, list):
+                for i in x:
+                    walk(i)
+
+        walk(obj)
+        return list(bundle_ids)
+
+    def get_supply_items(self, order_id: int) -> List[Dict[str, Any]]:
+        """
+        ТВОЯ рабочая схема:
+        - get -> находим bundle_ids
+        - bundle -> тянем items постранично по last_id
+        """
+        info = self.client.post("/v3/supply-order/get", {"order_ids": [order_id]})
+        bundle_ids = self.extract_bundle_ids(info)
+        if not bundle_ids:
+            raise RuntimeError(f"bundle_ids не найдены для order_id={order_id}")
+
+        items: List[Dict[str, Any]] = []
+        last_id = ""
+
+        while True:
+            payload: Dict[str, Any] = {"bundle_ids": bundle_ids, "limit": 100, "is_asc": True}
+            if last_id:
+                payload["last_id"] = last_id
+
+            data = self.client.post("/v1/supply-order/bundle", payload)
+
+            batch = data.get("items") or []
+            if isinstance(batch, list):
+                items.extend(batch)
+
+            next_last_id = data.get("last_id") or ""
+            has_next = data.get("has_next")
+
+            if not next_last_id or has_next is False or next_last_id == last_id:
+                break
+            last_id = next_last_id
+
+        return items
+
+    # -------- helpers for mapping --------
 
     @staticmethod
     def supply_id(order: Dict[str, Any]) -> Optional[int]:
@@ -118,7 +163,6 @@ class OzonSuppliesApi:
 
     @staticmethod
     def supply_number(order: Dict[str, Any]) -> str:
-        # номер поставки = order_number (как у тебя в примере)
         v = order.get("order_number")
         return str(v).strip() if v is not None else str(order.get("order_id"))
 
@@ -133,7 +177,7 @@ class OzonSuppliesApi:
 
     @staticmethod
     def warehouse_name(order: Dict[str, Any]) -> str:
-        # если в ответе есть поле склада — подхватим, иначе fallback
+        # если в деталке есть склад — берём, иначе "Ozon"
         for k in ("warehouse_name", "destination_warehouse_name"):
             v = order.get(k)
             if isinstance(v, str) and v.strip():
@@ -147,9 +191,14 @@ class OzonSuppliesApi:
         return "Ozon"
 
     @staticmethod
-    def extract_items(bundle_items: List[Dict[str, Any]]) -> List[tuple[str, float]]:
+    def extract_items_from_bundle_items(bundle_items: List[Dict[str, Any]]) -> List[tuple[str, float]]:
+        """
+        Из /v1/supply-order/bundle -> items
+        """
         out: List[tuple[str, float]] = []
         for it in bundle_items:
+            if not isinstance(it, dict):
+                continue
             offer_id = it.get("offer_id") or it.get("sku") or it.get("article") or it.get("merchant_sku")
             qty = it.get("quantity") or it.get("qty") or it.get("count")
             if offer_id is None or qty is None:
