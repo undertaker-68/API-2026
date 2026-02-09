@@ -1,0 +1,20 @@
+{
+  "supplies": {
+    "SUPPLY-123456": {
+      "supply_order_id": 987654321,
+      "last_status": "IN_TRANSIT",
+      "warehouse": "Склад Ozon Хоругвино",
+      "updated_at": "2026-02-09T04:55:12Z",
+      "ms_exists": true,
+      "ms_created": true,
+      "ms_customerorder_href": "https://api.moysklad.ru/api/remap/1.2/entity/customerorder/abcd-1234"
+    },
+    "SUPPLY-654321": {
+      "supply_order_id": 123456789,
+      "last_status": "READY_TO_SUPPLY",
+      "warehouse": "Ozon",
+      "updated_at": "2026-02-09T04:56:01Z",
+      "skip_reason": "no_items"
+    }
+  }
+}
