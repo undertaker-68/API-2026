@@ -42,7 +42,9 @@ def run_once(cfg: Config) -> None:
     since, to = compute_window(cfg.last_days, cfg.min_date_utc)
     log.info("Window: %s .. %s", iso_z(since), iso_z(to))
 
-    supplies = oz_api.list_supplies(iso_z(since), iso_z(to))
+    # list_supplies теперь ждёт datetime UTC
+    supplies = oz_api.list_supplies(since, to)
+
     log.info("Fetched supplies: %d", len(supplies))
 
     for s in supplies:
@@ -50,11 +52,9 @@ def run_once(cfg: Config) -> None:
         if supply_order_id is None:
             continue
 
-        info = oz_api.get_supply(supply_order_id)
-
-        number = oz_api.supply_number(s, info)
-        status = oz_api.supply_status(s, info)
-        wh_name = oz_api.warehouse_name(info)
+        number = oz_api.supply_number(s)
+        status = oz_api.supply_status(s)
+        wh_name = oz_api.warehouse_name(s)
 
         if status not in FBO_STATUSES_VALID:
             log.debug("Skip supply %s: status=%s", number, status)
