@@ -1,74 +1,66 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple
 
-from fbo.ms.client import MoySkladClient
-from fbo.ms.assortment import (
-    assortment_find_by_article,
-    bundle_components,
-    get_sale_price_value,
-)
+from fbo.ms.article_cache import ArticleCache
 
 
-def ms_meta(ms: MoySkladClient, entity: str, id_: str) -> Dict[str, Any]:
+def ms_meta(entity: str, id_: str) -> Dict[str, Any]:
+    """
+    Важно: base_url у нас в проекте всегда https://api.moysklad.ru/api/remap/1.2
+    поэтому href собираем статически (как и было в рабочей версии).
+    """
     return {
         "meta": {
-            "href": f"{ms.base_url}/entity/{entity}/{id_}",
+            "href": f"https://api.moysklad.ru/api/remap/1.2/entity/{entity}/{id_}",
             "type": entity,
             "mediaType": "application/json",
         }
     }
 
 
-def build_ms_positions(
-    ms: MoySkladClient,
-    items: List[Tuple[str, float]],  # (article, qty)
-) -> Tuple[List[Dict[str, Any]], List[str]]:
+def build_positions_from_items(
+    cache: ArticleCache,
+    items: List[Tuple[str, float]],  # (offer_id/article, qty)
+) -> tuple[List[Dict[str, Any]], List[str]]:
     """
-    - price = sale price ("Цена продажи")
-    - bundles expanded into components
-    - ВАЖНО: НЕ пишем reserve в позициях (оно ломало создание)
+    items: список (article, qty) где article == offer_id из Ozon и == article в МС
+    Комплекты разворачиваем в компоненты.
+    Цена = стандартная цена товара (Sale price) берется из ArticleCache.resolve()
     """
     positions: List[Dict[str, Any]] = []
     missing: List[str] = []
 
     for article, qty in items:
-        assort_short = assortment_find_by_article(ms, article)
-        if not assort_short:
-            missing.append(article)
+        a = (article or "").strip()
+        if not a:
             continue
 
-        assort_href = (assort_short.get("meta") or {}).get("href")
-        if not assort_href:
-            missing.append(article)
+        resolved = cache.resolve(a)
+
+        if resolved.kind == "missing" or not resolved.meta:
+            missing.append(a)
             continue
 
-        assort_full = ms.get_by_href(assort_href)
-        a_meta = assort_full.get("meta") or {}
-        a_type = a_meta.get("type") or (assort_short.get("meta") or {}).get("type")
-
-        if a_type == "bundle":
-            comps = bundle_components(ms, assort_href)
-            for comp_assort_short, comp_qty in comps:
-                comp_href = (comp_assort_short.get("meta") or {}).get("href")
-                if not comp_href:
-                    continue
-                comp_full = ms.get_by_href(comp_href)
-                price = get_sale_price_value(comp_full)
+        if resolved.kind == "bundle":
+            # qty комплекта * qty компонента
+            for c in resolved.components:
+                q = qty * c.qty
                 positions.append(
                     {
-                        "quantity": qty * comp_qty,
-                        "price": price,
-                        "assortment": {"meta": (comp_full.get("meta") or {})},
+                        "quantity": q,
+                        "price": c.price,
+                        "assortment": {"meta": c.meta},
+                        "reserve": q,
                     }
                 )
         else:
-            price = get_sale_price_value(assort_full)
             positions.append(
                 {
                     "quantity": qty,
-                    "price": price,
-                    "assortment": {"meta": a_meta},
+                    "price": resolved.price,
+                    "assortment": {"meta": resolved.meta},
+                    "reserve": qty,
                 }
             )
 
@@ -76,36 +68,37 @@ def build_ms_positions(
 
 
 def build_customerorder_payload(
-    ms: MoySkladClient,
+    *,
     supply_number: str,
-    dest_warehouse_name: str,
-    planned_to_iso_z: Optional[str],
-    items: List[Tuple[str, float]],
+    comment: str,
+    positions: List[Dict[str, Any]],
     org_id: str,
     agent_id: str,
     sales_channel_id: str,
     state_id: str,
-    dest_store_id: str,
-) -> Tuple[Dict[str, Any], List[str]]:
-    description = f"{supply_number} - {dest_warehouse_name}"
-
-    positions, missing = build_ms_positions(ms, items)
-
+    store_id: str,
+    planned_moment: str | None,
+) -> Dict[str, Any]:
+    """
+    Собираем payload для CustomerOrder.
+    store обязателен (ты это увидел по ошибкам).
+    planned_moment пишем в deliveryPlannedMoment если он есть.
+    """
     payload: Dict[str, Any] = {
         "name": supply_number,
-        "description": description,
-        "organization": ms_meta(ms, "organization", org_id),
-        "agent": ms_meta(ms, "counterparty", agent_id),
-        "salesChannel": ms_meta(ms, "saleschannel", sales_channel_id),
-        "state": ms_meta(ms, "state", state_id),
-        "store": ms_meta(ms, "store", dest_store_id),
-        "positions": positions,
-        # резерв на уровне документа (если надо — включено; МС это умеет)
-        "reserve": True,
+        "description": comment,
+        "organization": ms_meta("organization", org_id),
+        "agent": ms_meta("counterparty", agent_id),
+        "salesChannel": ms_meta("saleschannel", sales_channel_id),
+        "state": ms_meta("state", state_id),
+        "store": ms_meta("store", store_id),
     }
 
-    if planned_to_iso_z:
-        # поле "План. дата отгрузки" у CustomerOrder
-        payload["deliveryPlannedMoment"] = planned_to_iso_z
+    if planned_moment:
+        payload["deliveryPlannedMoment"] = planned_moment
 
-    return payload, missing
+    # пустой заказ допустим (как ты говорил), но если позиции есть — кладем
+    if positions:
+        payload["positions"] = positions
+
+    return payload
