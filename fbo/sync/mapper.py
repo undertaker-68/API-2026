@@ -6,10 +6,6 @@ from fbo.ms.article_cache import ArticleCache
 
 
 def ms_meta(entity: str, id_: str) -> Dict[str, Any]:
-    """
-    Важно: base_url у нас в проекте всегда https://api.moysklad.ru/api/remap/1.2
-    поэтому href собираем статически (как и было в рабочей версии).
-    """
     return {
         "meta": {
             "href": f"https://api.moysklad.ru/api/remap/1.2/entity/{entity}/{id_}",
@@ -19,15 +15,7 @@ def ms_meta(entity: str, id_: str) -> Dict[str, Any]:
     }
 
 
-def build_positions_from_items(
-    cache: ArticleCache,
-    items: List[Tuple[str, float]],  # (offer_id/article, qty)
-) -> tuple[List[Dict[str, Any]], List[str]]:
-    """
-    items: список (article, qty) где article == offer_id из Ozon и == article в МС
-    Комплекты разворачиваем в компоненты.
-    Цена = стандартная цена товара (Sale price) берется из ArticleCache.resolve()
-    """
+def build_positions_from_items(cache: ArticleCache, items: List[Tuple[str, float]]) -> tuple[List[Dict[str, Any]], List[str]]:
     positions: List[Dict[str, Any]] = []
     missing: List[str] = []
 
@@ -43,7 +31,6 @@ def build_positions_from_items(
             continue
 
         if resolved.kind == "bundle":
-            # qty комплекта * qty компонента
             for c in resolved.components:
                 q = qty * c.qty
                 positions.append(
@@ -51,7 +38,6 @@ def build_positions_from_items(
                         "quantity": q,
                         "price": c.price,
                         "assortment": {"meta": c.meta},
-                        "reserve": q,
                     }
                 )
         else:
@@ -60,7 +46,6 @@ def build_positions_from_items(
                     "quantity": qty,
                     "price": resolved.price,
                     "assortment": {"meta": resolved.meta},
-                    "reserve": qty,
                 }
             )
 
@@ -79,11 +64,6 @@ def build_customerorder_payload(
     store_id: str,
     planned_moment: str | None,
 ) -> Dict[str, Any]:
-    """
-    Собираем payload для CustomerOrder.
-    store обязателен (ты это увидел по ошибкам).
-    planned_moment пишем в deliveryPlannedMoment если он есть.
-    """
     payload: Dict[str, Any] = {
         "name": supply_number,
         "description": comment,
@@ -97,7 +77,6 @@ def build_customerorder_payload(
     if planned_moment:
         payload["deliveryPlannedMoment"] = planned_moment
 
-    # пустой заказ допустим (как ты говорил), но если позиции есть — кладем
     if positions:
         payload["positions"] = positions
 

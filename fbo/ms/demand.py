@@ -21,10 +21,6 @@ def _ms_meta_href(href: str, type_: str) -> Dict[str, Any]:
     return {"meta": {"href": href, "type": type_, "mediaType": "application/json"}}
 
 
-def find_demand(ms: MoySkladClient, name: str):
-    return find_by_name(ms, "demand", name)
-
-
 def create_demand_with_applicable(
     ms: MoySkladClient,
     *,
@@ -35,15 +31,10 @@ def create_demand_with_applicable(
     state_id: str,
     store_id: str,
     positions: list[dict],
-    customerorder_href: Optional[str] = None,  # <-- важно: для связки
+    customerorder_href: Optional[str] = None,
     dry_run: bool,
 ) -> Tuple[bool, Dict[str, Any] | None, str]:
-    """
-    returns (created_or_exists, created_doc_or_none, reason)
-    reason: ok | dry_run | duplicate_number | error_applicable_failed
-    """
-
-    existing = find_demand(ms, name)
+    existing = find_by_name(ms, "demand", name)
     if existing:
         return True, existing, "ok"
 
@@ -56,8 +47,6 @@ def create_demand_with_applicable(
         "store": _ms_meta(ms, "store", store_id),
         "positions": positions,
     }
-
-    # связка с CustomerOrder
     if customerorder_href:
         payload_base["customerOrder"] = _ms_meta_href(customerorder_href, "customerorder")
 

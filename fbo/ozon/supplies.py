@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from fbo.ozon.client import OzonClient
 
@@ -36,52 +36,45 @@ class OzonSuppliesApi:
     def __init__(self, client: OzonClient):
         self.client = client
 
-    def list_supply_orders(self, from_utc: datetime, to_utc_ex: datetime, limit: int = 100) -> List[Dict[str, Any]]:
+    def list_supply_orders(self, since_utc: datetime, to_utc_ex: datetime, limit: int = 100) -> List[Dict[str, Any]]:
         last_id = None
         result: List[Dict[str, Any]] = []
 
         while True:
-            list_payload: Dict[str, Any] = {
+            payload: Dict[str, Any] = {
                 "filter": {"states": STATES_ALL},
                 "limit": limit,
                 "sort_by": "ORDER_CREATION",
                 "sort_dir": "DESC",
             }
             if last_id:
-                list_payload["last_id"] = last_id
+                payload["last_id"] = last_id
 
-            page = self.client.post("/v3/supply-order/list", list_payload)
-            order_ids = page.get("order_ids", []) or []
+            page = self.client.post("/v3/supply-order/list", payload)
+            order_ids = page.get("order_ids") or []
             if not order_ids:
                 break
 
-            min_created_page: Optional[datetime] = None
+            min_created: Optional[datetime] = None
 
             for i in range(0, len(order_ids), 50):
-                chunk = order_ids[i : i + 50]
+                chunk = order_ids[i:i + 50]
                 details = self.client.post("/v3/supply-order/get", {"order_ids": chunk})
-                orders = details.get("orders", []) or []
-
-                for o in orders:
+                for o in details.get("orders") or []:
                     created = parse_utc(o.get("created_date"))
                     if not created:
                         continue
-
-                    if min_created_page is None or created < min_created_page:
-                        min_created_page = created
-
-                    if from_utc <= created < to_utc_ex:
+                    min_created = created if min_created is None else min(min_created, created)
+                    if since_utc <= created < to_utc_ex:
                         result.append(o)
 
-            # ранняя остановка (DESC)
-            if min_created_page and min_created_page < from_utc:
+            if min_created and min_created < since_utc:
                 break
 
             last_id = page.get("last_id")
             if not last_id:
                 break
 
-        # дедуп
         seen = set()
         out: List[Dict[str, Any]] = []
         for o in sorted(result, key=lambda x: (x.get("created_date", ""), x.get("order_number", ""))):
@@ -92,7 +85,67 @@ class OzonSuppliesApi:
             out.append(o)
         return out
 
-    # -------- bundle ids extraction / bundle items --------
+    @staticmethod
+    def supply_id(order: Dict[str, Any]) -> Optional[int]:
+        try:
+            return int(order.get("order_id"))
+        except Exception:
+            return None
+
+    @staticmethod
+    def supply_number(order: Dict[str, Any]) -> str:
+        v = order.get("order_number")
+        return str(v).strip() if v is not None else str(order.get("order_id"))
+
+    @staticmethod
+    def supply_status(order: Dict[str, Any]) -> str:
+        st = order.get("state")
+        if isinstance(st, str) and st and not st.isdigit():
+            return st.strip()
+        try:
+            st_i = int(st)
+        except Exception:
+            return "UNKNOWN"
+        return STATE_NAME.get(st_i, f"STATE_{st_i}")
+
+    @staticmethod
+    def destination_warehouse_name(order: Dict[str, Any]) -> str:
+        supplies = order.get("supplies")
+        if isinstance(supplies, list) and supplies:
+            s0 = supplies[0]
+            if isinstance(s0, dict):
+                sw = s0.get("storage_warehouse")
+                if isinstance(sw, dict):
+                    name = sw.get("name")
+                    if isinstance(name, str) and name.strip():
+                        return name.strip()
+        return "Ozon"
+
+    @staticmethod
+    def warehouse_name(order: Dict[str, Any]) -> str:
+        return OzonSuppliesApi.destination_warehouse_name(order)
+
+    @staticmethod
+    def planned_moment(order: Dict[str, Any]) -> Optional[str]:
+        ts = order.get("timeslot")
+        if isinstance(ts, dict):
+            inner = ts.get("timeslot")
+            if isinstance(inner, dict):
+                to = inner.get("to")
+                if isinstance(to, str) and to.strip():
+                    return to.strip()
+                fr = inner.get("from")
+                if isinstance(fr, str) and fr.strip():
+                    return fr.strip()
+
+        supplies = order.get("supplies")
+        if isinstance(supplies, list) and supplies:
+            sw = supplies[0].get("storage_warehouse")
+            if isinstance(sw, dict):
+                arr = sw.get("arrival_date")
+                if isinstance(arr, str) and arr.strip():
+                    return arr.strip()
+        return None
 
     @staticmethod
     def extract_bundle_ids(obj: Any) -> List[str]:
@@ -115,7 +168,7 @@ class OzonSuppliesApi:
         info = self.client.post("/v3/supply-order/get", {"order_ids": [order_id]})
         bundle_ids = self.extract_bundle_ids(info)
         if not bundle_ids:
-            raise RuntimeError(f"bundle_ids не найдены для order_id={order_id}")
+            raise RuntimeError(f"bundle_ids not found for order_id={order_id}")
 
         items: List[Dict[str, Any]] = []
         last_id = ""
@@ -126,7 +179,6 @@ class OzonSuppliesApi:
                 payload["last_id"] = last_id
 
             data = self.client.post("/v1/supply-order/bundle", payload)
-
             batch = data.get("items") or []
             if isinstance(batch, list):
                 items.extend(batch)
@@ -139,99 +191,6 @@ class OzonSuppliesApi:
             last_id = next_last_id
 
         return items
-
-    # -------- helpers for mapping --------
-
-    @staticmethod
-    def supply_id(order: Dict[str, Any]) -> Optional[int]:
-        v = order.get("order_id")
-        try:
-            return int(v)
-        except Exception:
-            return None
-
-    @staticmethod
-    def supply_number(order: Dict[str, Any]) -> str:
-        v = order.get("order_number")
-        return str(v).strip() if v is not None else str(order.get("order_id"))
-
-    @staticmethod
-    def supply_status(order: Dict[str, Any]) -> str:
-        st = order.get("state")
-        if isinstance(st, str) and st and not st.isdigit():
-            return st.strip()
-        try:
-            st_i = int(st)
-        except Exception:
-            return "UNKNOWN"
-        return STATE_NAME.get(st_i, f"STATE_{st_i}")
-
-    # ====== ВАЖНО: совместимость с runner.py из архива ======
-
-    @staticmethod
-    def destination_warehouse_name(order: Dict[str, Any]) -> str:
-        """
-        Склад назначения (куда едет на хранение): supplies[0].storage_warehouse.name
-        """
-        supplies = order.get("supplies")
-        if isinstance(supplies, list) and supplies:
-            s0 = supplies[0]
-            if isinstance(s0, dict):
-                sw = s0.get("storage_warehouse")
-                if isinstance(sw, dict):
-                    name = sw.get("name")
-                    if isinstance(name, str) and name.strip():
-                        return name.strip()
-        return "Ozon"
-
-    @staticmethod
-    def planned_timeslot_to(order: Dict[str, Any]) -> Optional[str]:
-        """
-        timeslot.timeslot.to (ISO Z). Если to нет — берём from.
-        """
-        ts = order.get("timeslot")
-        if isinstance(ts, dict):
-            t2 = ts.get("timeslot")
-            if isinstance(t2, dict):
-                to = t2.get("to")
-                if isinstance(to, str) and to.strip():
-                    return to.strip()
-                fr = t2.get("from")
-                if isinstance(fr, str) and fr.strip():
-                    return fr.strip()
-        return None
-
-    @staticmethod
-    def arrival_date(order: Dict[str, Any]) -> Optional[str]:
-        """
-        supplies[0].storage_warehouse.arrival_date (если нужно как fallback).
-        """
-        supplies = order.get("supplies")
-        if isinstance(supplies, list) and supplies:
-            sw = supplies[0].get("storage_warehouse")
-            if isinstance(sw, dict):
-                v = sw.get("arrival_date")
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-        return None
-
-    @staticmethod
-    def warehouse_name(order: Dict[str, Any]) -> str:
-        """
-        runner.py ожидает warehouse_name() -> используем destination_warehouse_name()
-        """
-        return OzonSuppliesApi.destination_warehouse_name(order)
-
-    @staticmethod
-    def planned_moment(order: Dict[str, Any]) -> Optional[str]:
-        """
-        runner.py ожидает planned_moment().
-        По бизнесу: берём timeslot.to (дата/время отгрузки).
-        Если timeslot нет — fallback на arrival_date.
-        """
-        return OzonSuppliesApi.planned_timeslot_to(order) or OzonSuppliesApi.arrival_date(order)
-
-    # ====== offer_id -> article (ВАЖНО) ======
 
     @staticmethod
     def _find_offer_id(x: Any) -> Optional[str]:
@@ -252,9 +211,6 @@ class OzonSuppliesApi:
 
     @staticmethod
     def extract_items_from_bundle_items(bundle_items: List[Dict[str, Any]]) -> List[Tuple[str, float]]:
-        """
-        Берём ТОЛЬКО offer_id (это == article в МС).
-        """
         out: List[Tuple[str, float]] = []
         for it in bundle_items:
             if not isinstance(it, dict):

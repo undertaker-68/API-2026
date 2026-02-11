@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import random
 import time
+from typing import Any, Dict
+
 import requests
-from typing import Any, Dict, Optional
 
 
 class OzonClient:
@@ -21,37 +23,21 @@ class OzonClient:
     def post(self, path: str, payload: Dict[str, Any], timeout: int = 60) -> Dict[str, Any]:
         url = self.base_url + path
 
-        # retry на 429/5xx
-        backoff = 0.4
+        last_exc: Exception | None = None
         for attempt in range(1, 8):
-            r = self.session.post(url, json=payload, timeout=timeout)
-
-            if r.status_code == 429 or 500 <= r.status_code <= 599:
-                if attempt == 7:
-                    raise requests.HTTPError(
-                        f"{r.status_code} {r.reason} for {url}\nResponse: {r.text}",
-                        response=r,
-                    )
-                time.sleep(backoff)
-                backoff = min(backoff * 1.8, 6.0)
+            try:
+                r = self.session.post(url, json=payload, timeout=timeout)
+                if r.status_code == 429 or 500 <= r.status_code < 600:
+                    sleep_s = min(8.0, (0.5 * (2 ** (attempt - 1))) + random.random() * 0.3)
+                    time.sleep(sleep_s)
+                    continue
+                r.raise_for_status()
+                return r.json()
+            except Exception as e:
+                last_exc = e
+                time.sleep(min(3.0, 0.2 * attempt))
                 continue
 
-            if r.status_code >= 400:
-                raise requests.HTTPError(
-                    f"{r.status_code} {r.reason} for {url}\nResponse: {r.text}",
-                    response=r,
-                )
-            return r.json()
-
-        # unreachable
-        raise RuntimeError("OzonClient.post: retry loop failed unexpectedly")
-
-    def get(self, path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 60) -> Dict[str, Any]:
-        url = self.base_url + path
-        r = self.session.get(url, params=params, timeout=timeout)
-        if r.status_code >= 400:
-            raise requests.HTTPError(
-                f"{r.status_code} {r.reason} for {url}\nResponse: {r.text}",
-                response=r,
-            )
-        return r.json()
+        if last_exc:
+            raise last_exc
+        raise RuntimeError(f"Ozon request failed: {path}")

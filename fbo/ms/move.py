@@ -21,10 +21,6 @@ def _ms_meta_href(href: str, type_: str) -> Dict[str, Any]:
     return {"meta": {"href": href, "type": type_, "mediaType": "application/json"}}
 
 
-def find_move(ms: MoySkladClient, name: str):
-    return find_by_name(ms, "move", name)
-
-
 def create_move_with_applicable(
     ms: MoySkladClient,
     *,
@@ -36,15 +32,10 @@ def create_move_with_applicable(
     source_store_id: str,
     target_store_id: str,
     positions: list[dict],
-    customerorder_href: Optional[str] = None,  # <-- важно: для связки
+    customerorder_href: Optional[str] = None,
     dry_run: bool,
 ) -> Tuple[bool, Dict[str, Any] | None, str]:
-    """
-    returns (created_or_exists, created_doc_or_none, reason)
-    reason: ok | dry_run | duplicate_number | error_applicable_failed
-    """
-
-    existing = find_move(ms, name)
+    existing = find_by_name(ms, "move", name)
     if existing:
         return True, existing, "ok"
 
@@ -58,15 +49,12 @@ def create_move_with_applicable(
         "targetStore": _ms_meta(ms, "store", target_store_id),
         "positions": positions,
     }
-
-    # связка с CustomerOrder (чтобы в МС была "Связанные документы")
     if customerorder_href:
         payload_base["customerOrder"] = _ms_meta_href(customerorder_href, "customerorder")
 
     if dry_run:
         return True, None, "dry_run"
 
-    # applicable True -> если ошибка, пробуем applicable False
     for applicable in (True, False):
         payload = dict(payload_base)
         payload["applicable"] = applicable
