@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from fbo.ozon.client import OzonClient
 
 
-# Коды статусов (то, что ты уже собрал)
 STATES_ALL = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
 STATE_NAME = {
@@ -38,11 +37,6 @@ class OzonSuppliesApi:
         self.client = client
 
     def list_supply_orders(self, from_utc: datetime, to_utc_ex: datetime, limit: int = 100) -> List[Dict[str, Any]]:
-        """
-        Возвращает orders (деталка) в окне дат:
-        list -> order_ids + last_id
-        get  -> orders (created_date)
-        """
         last_id = None
         result: List[Dict[str, Any]] = []
 
@@ -79,7 +73,6 @@ class OzonSuppliesApi:
                     if from_utc <= created < to_utc_ex:
                         result.append(o)
 
-            # ранняя остановка (DESC)
             if min_created_page and min_created_page < from_utc:
                 break
 
@@ -87,7 +80,6 @@ class OzonSuppliesApi:
             if not last_id:
                 break
 
-        # дедуп
         seen = set()
         out: List[Dict[str, Any]] = []
         for o in sorted(result, key=lambda x: (x.get("created_date", ""), x.get("order_number", ""))):
@@ -97,8 +89,6 @@ class OzonSuppliesApi:
             seen.add(key)
             out.append(o)
         return out
-
-    # -------- bundle ids extraction / bundle items --------
 
     @staticmethod
     def extract_bundle_ids(obj: Any) -> List[str]:
@@ -118,11 +108,6 @@ class OzonSuppliesApi:
         return list(bundle_ids)
 
     def get_supply_items(self, order_id: int) -> List[Dict[str, Any]]:
-        """
-        ТВОЯ рабочая схема:
-        - get -> находим bundle_ids
-        - bundle -> тянем items постранично по last_id
-        """
         info = self.client.post("/v3/supply-order/get", {"order_ids": [order_id]})
         bundle_ids = self.extract_bundle_ids(info)
         if not bundle_ids:
@@ -151,8 +136,6 @@ class OzonSuppliesApi:
 
         return items
 
-    # -------- helpers for mapping --------
-
     @staticmethod
     def supply_id(order: Dict[str, Any]) -> Optional[int]:
         v = order.get("order_id")
@@ -170,11 +153,9 @@ class OzonSuppliesApi:
     def supply_status(order: Dict[str, Any]) -> str:
         st = order.get("state")
 
-        # если уже строка статуса (READY_TO_SUPPLY, IN_TRANSIT...)
         if isinstance(st, str) and st and not st.isdigit():
             return st.strip()
 
-        # если число или строка-число
         try:
             st_i = int(st)
         except Exception:
@@ -185,8 +166,8 @@ class OzonSuppliesApi:
     @staticmethod
     def warehouse_name(order: dict) -> str:
         """
-        Нам нужен склад назначения (storage_warehouse.name) из блока supplies[0],
-        т.к. drop_off_warehouse — это точка сдачи (кроссдок), а не финальный склад.
+        Нужен склад назначения: supplies[0].storage_warehouse.name
+        (а drop_off_warehouse — точка сдачи/кроссдок).
         """
         supplies = order.get("supplies")
         if isinstance(supplies, list) and supplies:
@@ -195,14 +176,12 @@ class OzonSuppliesApi:
                 name = sw.get("name")
                 if isinstance(name, str) and name.strip():
                     return name.strip()
-
         return "Склад назначения"
 
     @staticmethod
     def planned_moment(order: dict) -> str | None:
         """
-        Пишем planned дату в МС из supplies[0].storage_warehouse.arrival_date.
-        Это дата прибытия на финальный склад.
+        План-дата: supplies[0].storage_warehouse.arrival_date
         """
         supplies = order.get("supplies")
         if isinstance(supplies, list) and supplies:
@@ -218,7 +197,6 @@ class OzonSuppliesApi:
         out: list[tuple[str, float]] = []
 
         def pick_offer_id(it: dict) -> str | None:
-            # реальные варианты ключей
             for k in ("offer_id", "offerId", "offerID", "merchant_sku", "article"):
                 v = it.get(k)
                 if isinstance(v, str) and v.strip():
@@ -240,13 +218,10 @@ class OzonSuppliesApi:
         for it in bundle_items:
             if not isinstance(it, dict):
                 continue
-
             offer = pick_offer_id(it)
             qty = pick_qty(it)
-
             if not offer or qty is None:
                 continue
-
             out.append((offer, qty))
 
         return out

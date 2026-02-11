@@ -14,11 +14,15 @@ def ms_meta(entity: str, id_: str) -> Dict[str, Any]:
     }
 
 
+def _normalize_meta(m: Dict[str, Any]) -> Dict[str, Any]:
+    # иногда meta может прийти как {"meta": {...}}
+    return m["meta"] if isinstance(m, dict) and "meta" in m and isinstance(m["meta"], dict) else m
+
+
 def build_positions_from_items(
     cache: ArticleCache,
     items: List[Tuple[str, float]],
 ) -> tuple[List[Dict[str, Any]], List[str]]:
-
     positions: List[Dict[str, Any]] = []
     missing: List[str] = []
 
@@ -31,20 +35,22 @@ def build_positions_from_items(
 
         if resolved.kind == "bundle":
             for c in resolved.components:
+                m = _normalize_meta(c.meta)
                 positions.append(
                     {
                         "quantity": qty * c.qty,
-                        "price": c.price,
-                        "assortment": {"meta": c.meta},
+                        "price": int(c.price),      # важно: int
+                        "assortment": {"meta": m},
                         "reserve": qty * c.qty,
                     }
                 )
         else:
+            m = _normalize_meta(resolved.meta)
             positions.append(
                 {
                     "quantity": qty,
-                    "price": resolved.price,
-                    "assortment": {"meta": resolved.meta},
+                    "price": int(resolved.price),  # важно: int
+                    "assortment": {"meta": m},
                     "reserve": qty,
                 }
             )
@@ -61,10 +67,8 @@ def build_customerorder_payload(
     agent_id: str,
     sales_channel_id: str,
     state_id: str,
-    store_id: str,
     planned_moment: str | None,
 ) -> Dict[str, Any]:
-
     payload: Dict[str, Any] = {
         "name": supply_number,
         "description": comment,
@@ -72,7 +76,6 @@ def build_customerorder_payload(
         "agent": ms_meta("counterparty", agent_id),
         "salesChannel": ms_meta("saleschannel", sales_channel_id),
         "state": ms_meta("state", state_id),
-        "store": ms_meta("store", store_id),
     }
 
     if planned_moment:
