@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
-
 from fbo.ms.article_cache import ArticleCache
 
 
@@ -17,13 +16,15 @@ def ms_meta(entity: str, id_: str) -> Dict[str, Any]:
 
 def build_positions_from_items(
     cache: ArticleCache,
-    items: List[Tuple[str, float]],  # (offer_id/article, qty)
+    items: List[Tuple[str, float]],
 ) -> tuple[List[Dict[str, Any]], List[str]]:
+
     positions: List[Dict[str, Any]] = []
     missing: List[str] = []
 
     for article, qty in items:
-        resolved = cache.resolve(article)
+        resolved = cache.resolve(article.strip())
+
         if resolved.kind == "missing" or not resolved.meta:
             missing.append(article)
             continue
@@ -60,7 +61,10 @@ def build_customerorder_payload(
     agent_id: str,
     sales_channel_id: str,
     state_id: str,
+    store_id: str,
+    planned_moment: str | None,
 ) -> Dict[str, Any]:
+
     payload: Dict[str, Any] = {
         "name": supply_number,
         "description": comment,
@@ -68,8 +72,13 @@ def build_customerorder_payload(
         "agent": ms_meta("counterparty", agent_id),
         "salesChannel": ms_meta("saleschannel", sales_channel_id),
         "state": ms_meta("state", state_id),
+        "store": ms_meta("store", store_id),
     }
-    # positions можно не передавать вообще (пустой заказ разрешаем)
+
+    if planned_moment:
+        payload["deliveryPlannedMoment"] = planned_moment
+
     if positions:
         payload["positions"] = positions
+
     return payload

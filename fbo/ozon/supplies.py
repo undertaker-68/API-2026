@@ -183,38 +183,50 @@ class OzonSuppliesApi:
         return STATE_NAME.get(st_i, f"STATE_{st_i}")
 
     @staticmethod
-    def warehouse_name(order: Dict[str, Any]) -> str:
-        # если в деталке есть склад — берём, иначе "Ozon"
-        for k in ("warehouse_name", "destination_warehouse_name"):
-            v = order.get(k)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        for k in ("warehouse", "destination_warehouse"):
-            v = order.get(k)
-            if isinstance(v, dict):
-                name = v.get("name")
-                if isinstance(name, str) and name.strip():
-                    return name.strip()
-        return "Ozon"
+    def warehouse_name(order: dict) -> str:
+        # В /v3/supply-order/get есть drop_off_warehouse (склад назначения)
+        dow = order.get("drop_off_warehouse")
+        if isinstance(dow, dict):
+            for k in ("name", "title"):
+                v = dow.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        return "Склад назначения"
 
     @staticmethod
-    def extract_items_from_bundle_items(bundle_items: List[Dict[str, Any]]) -> List[tuple[str, float]]:
-        """
-        Из /v1/supply-order/bundle -> items
-        """
-        out: List[tuple[str, float]] = []
+    def extract_items_from_bundle_items(bundle_items: list[dict]) -> list[tuple[str, float]]:
+        out: list[tuple[str, float]] = []
+
+        def pick_offer_id(it: dict) -> str | None:
+            # реальные варианты ключей
+            for k in ("offer_id", "offerId", "offerID", "merchant_sku", "article"):
+                v = it.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            return None
+
+        def pick_qty(it: dict) -> float | None:
+            for k in ("quantity", "qty", "count"):
+                v = it.get(k)
+                if v is None:
+                    continue
+                try:
+                    q = float(v)
+                    return q if q > 0 else None
+                except Exception:
+                    continue
+            return None
+
         for it in bundle_items:
             if not isinstance(it, dict):
                 continue
-            offer_id = it.get("offer_id") or it.get("sku") or it.get("article") or it.get("merchant_sku")
-            qty = it.get("quantity") or it.get("qty") or it.get("count")
-            if offer_id is None or qty is None:
+
+            offer = pick_offer_id(it)
+            qty = pick_qty(it)
+
+            if not offer or qty is None:
                 continue
-            try:
-                q = float(qty)
-            except Exception:
-                continue
-            if q <= 0:
-                continue
-            out.append((str(offer_id).strip(), q))
+
+            out.append((offer, qty))
+
         return out

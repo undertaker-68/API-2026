@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fbo.ms.client import MoySkladClient
 from fbo.ms.errors import is_duplicate_number
@@ -8,10 +8,20 @@ from fbo.ms.find_by_name import find_by_name
 
 
 def _ms_meta(entity: str, id_: str) -> Dict[str, Any]:
-    return {"meta": {"href": f"https://api.moysklad.ru/api/remap/1.2/entity/{entity}/{id_}", "type": entity, "mediaType": "application/json"}}
+    return {
+        "meta": {
+            "href": f"https://api.moysklad.ru/api/remap/1.2/entity/{entity}/{id_}",
+            "type": entity,
+            "mediaType": "application/json",
+        }
+    }
 
 
-def find_move(ms: MoySkladClient, name: str):
+def _customerorder_meta(href: str) -> Dict[str, Any]:
+    return {"meta": {"href": href, "type": "customerorder", "mediaType": "application/json"}}
+
+
+def find_move(ms: MoySkladClient, name: str) -> Optional[Dict[str, Any]]:
     return find_by_name(ms, "move", name)
 
 
@@ -26,17 +36,19 @@ def create_move_with_applicable(
     source_store_id: str,
     target_store_id: str,
     positions: list[dict],
+    customerorder_href: str | None,
     dry_run: bool,
 ) -> tuple[bool, Dict[str, Any] | None, str]:
     """
     returns (created_or_exists, created_doc_or_none, reason)
-    reason: ok | dry_run | duplicate_number | error_applicable_failed | error_other
+    reason:
+      ok | dry_run | duplicate_number | error_applicable_failed
     """
     existing = find_move(ms, name)
     if existing:
         return True, existing, "ok"
 
-    payload_base = {
+    payload_base: Dict[str, Any] = {
         "name": name,
         "description": description,
         "organization": _ms_meta("organization", org_id),
@@ -47,10 +59,13 @@ def create_move_with_applicable(
         "positions": positions,
     }
 
+    if customerorder_href:
+        payload_base["customerOrder"] = _customerorder_meta(customerorder_href)
+
     if dry_run:
         return True, None, "dry_run"
 
-    # try applicable true then false
+    # applicable=True then False
     for applicable in (True, False):
         payload = dict(payload_base)
         payload["applicable"] = applicable
@@ -60,7 +75,6 @@ def create_move_with_applicable(
         except Exception as e:
             if is_duplicate_number(e):
                 return False, None, "duplicate_number"
-            # if first try failed, second will be tried; if second fails -> applicable_failed
-            last = applicable
+            # else retry with applicable=False
 
     return False, None, "error_applicable_failed"

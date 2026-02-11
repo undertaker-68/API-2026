@@ -5,14 +5,19 @@ from typing import Any, Dict, List, Tuple, Optional
 from fbo.ms.client import MoySkladClient
 
 
-def assortment_find_by_article(ms: MoySkladClient, article: str) -> Optional[Dict[str, Any]]:
-    data = ms.get("/entity/assortment", params={"search": article, "limit": 100})
-    rows = data.get("rows") or []
-    for r in rows:
-        if (r.get("article") or "").strip() == article.strip():
-            return r
-    return rows[0] if rows else None
+def assortment_find_by_article(ms: MoySkladClient, article: str):
+    a = article.strip()
 
+    # 1) точное совпадение по артикулу
+    data = ms.get("/entity/assortment", params={"filter": f"article={a}", "limit": 100})
+    rows = data.get("rows") or []
+    if rows:
+        return rows[0]
+
+    # 2) fallback на search (если у кого-то в МС артикул не заполнен)
+    data = ms.get("/entity/assortment", params={"search": a, "limit": 100})
+    rows = data.get("rows") or []
+    return rows[0] if rows else None
 
 def get_sale_price_value(assortment_full: Dict[str, Any]) -> int:
     """

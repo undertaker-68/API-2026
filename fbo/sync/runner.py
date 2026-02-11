@@ -54,21 +54,10 @@ def run_once(cfg: Config) -> None:
 
     # Диагностика статусов (можно удалить потом)
     hist: dict[str, int] = {}
-    sample = None
     for s in supplies:
-        st_raw = s.get("state")
         st = oz_api.supply_status(s)
         hist[st] = hist.get(st, 0) + 1
-        if sample is None:
-            sample = {
-                "order_number": s.get("order_number"),
-                "state_raw": st_raw,
-                "state_parsed": st,
-                "keys": list(s.keys()),
-            }
     log.info("Status histogram: %s", hist)
-    if sample:
-        log.info("Sample order: %s", sample)
 
     for s in supplies:
         order_id = oz_api.supply_id(s)
@@ -78,6 +67,7 @@ def run_once(cfg: Config) -> None:
         number = oz_api.supply_number(s)
         status = oz_api.supply_status(s)
         wh_name = oz_api.warehouse_name(s)
+        planned = getattr(oz_api, "planned_moment", lambda _x: None)(s)
         comment = f"{number} - {wh_name}"
 
         rec = state.supplies.get(number) or {}
@@ -124,7 +114,6 @@ def run_once(cfg: Config) -> None:
                 positions_cache[number] = (positions, missing)
                 return positions, missing
             except requests.HTTPError as e:
-                # Ozon 429 on bundle: don't fail run, retry next poll
                 resp = getattr(e, "response", None)
                 if resp is not None and resp.status_code == 429:
                     rec["ozon_bundle_rate_limited"] = True
@@ -143,7 +132,6 @@ def run_once(cfg: Config) -> None:
             else:
                 gp = get_positions()
                 if gp is None:
-                    # rate limited - skip supply this cycle
                     continue
                 positions, missing = gp
 
@@ -155,6 +143,8 @@ def run_once(cfg: Config) -> None:
                     agent_id=cfg.ms_agent_id,
                     sales_channel_id=cfg.ms_sales_channel_fbo_id,
                     state_id=cfg.ms_fbo_state_id,
+                    store_id=cfg.ms_fbo_demand_store_id,  # склад в заказе
+                    planned_moment=planned,
                 )
 
                 if cfg.dry_run:
@@ -178,6 +168,8 @@ def run_once(cfg: Config) -> None:
                         rec["customerorder_error"] = error_text(e)
                         continue
 
+        co_href = rec.get("customerorder_href") or None
+
         # ===================== Move (only on READY) =====================
         if status == READY and not rec.get("move_done"):
             rec["ready_seen"] = True
@@ -197,11 +189,11 @@ def run_once(cfg: Config) -> None:
                 source_store_id=cfg.ms_fbo_move_source_store_id,
                 target_store_id=cfg.ms_fbo_move_target_store_id,
                 positions=positions,
+                customerorder_href=co_href,
                 dry_run=cfg.dry_run,
             )
 
             if reason == "duplicate_number":
-                # номер занят => забываем, demand тоже не делаем
                 rec["final"] = True
                 rec["final_reason"] = "move_duplicate_number"
                 log.warning("Move duplicate number => final: %s", number)
@@ -219,6 +211,7 @@ def run_once(cfg: Config) -> None:
 
         # ===================== Demand (ANY status except CANCELLED) =====================
         if not rec.get("demand_done"):
+            # если demand уже есть - финалим
             existing_d = find_by_name(ms, "demand", number)
             if existing_d:
                 rec["demand_done"] = True
@@ -242,6 +235,7 @@ def run_once(cfg: Config) -> None:
                 state_id=cfg.ms_fbo_demand_state_id,
                 store_id=cfg.ms_fbo_demand_store_id,
                 positions=positions,
+                customerorder_href=co_href,
                 dry_run=cfg.dry_run,
             )
 
