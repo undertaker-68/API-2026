@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Optional, Tuple, List
+
+import requests
 
 from fbo.config import Config
 from fbo.ozon.client import OzonClient
@@ -49,7 +52,7 @@ def run_once(cfg: Config) -> None:
     supplies = oz_api.list_supply_orders(since, to)
     log.info("Fetched supplies: %d", len(supplies))
 
-    # Диагностика: распределение статусов (можно потом убрать)
+    # Диагностика статусов (можно удалить потом)
     hist: dict[str, int] = {}
     sample = None
     for s in supplies:
@@ -72,20 +75,20 @@ def run_once(cfg: Config) -> None:
         if order_id is None:
             continue
 
-        number = oz_api.supply_number(s)  # order_number
+        number = oz_api.supply_number(s)
         status = oz_api.supply_status(s)
         wh_name = oz_api.warehouse_name(s)
         comment = f"{number} - {wh_name}"
 
         rec = state.supplies.get(number) or {}
 
-        # if already final -> skip everything (but still refresh last seen)
+        # final => skip
         if rec.get("final") is True:
             rec["updated_at"] = iso_z(datetime.now(timezone.utc))
             state.supplies[number] = rec
             continue
 
-        # update tracking
+        # track
         rec.update(
             {
                 "supply_order_id": order_id,
@@ -102,13 +105,34 @@ def run_once(cfg: Config) -> None:
             rec["final_reason"] = "cancelled"
             continue
 
-        # --- get items/positions when needed ---
-        def get_positions() -> tuple[list[dict], list[str]]:
-            bundle_items = oz_api.get_supply_items(order_id)
-            items = oz_api.extract_items_from_bundle_items(bundle_items)
-            positions, missing = build_positions_from_items(cache, items)
-            rec["missing_articles"] = missing
-            return positions, missing
+        # -------- positions cache per supply per run --------
+        positions_cache: dict[str, Tuple[List[dict], List[str]]] = {}
+
+        def get_positions() -> Optional[Tuple[List[dict], List[str]]]:
+            """
+            Возвращает (positions, missing) или None если временная ошибка (например 429 Ozon).
+            Кэшируем в рамках обработки одной поставки.
+            """
+            if number in positions_cache:
+                return positions_cache[number]
+
+            try:
+                bundle_items = oz_api.get_supply_items(order_id)  # may throw 429
+                items = oz_api.extract_items_from_bundle_items(bundle_items)
+                positions, missing = build_positions_from_items(cache, items)
+                rec["missing_articles"] = missing
+                positions_cache[number] = (positions, missing)
+                return positions, missing
+            except requests.HTTPError as e:
+                # Ozon 429 on bundle: don't fail run, retry next poll
+                resp = getattr(e, "response", None)
+                if resp is not None and resp.status_code == 429:
+                    rec["ozon_bundle_rate_limited"] = True
+                    rec["ozon_bundle_last_error"] = str(e)
+                    log.warning("Ozon bundle 429 (rate limit), will retry next cycle: %s", number)
+                    return None
+                rec["ozon_bundle_last_error"] = str(e)
+                raise
 
         # ===================== CustomerOrder (always, except CANCELLED) =====================
         if not rec.get("customerorder_exists") and not rec.get("customerorder_created"):
@@ -117,7 +141,12 @@ def run_once(cfg: Config) -> None:
                 rec["customerorder_exists"] = True
                 rec["customerorder_href"] = (existing_co.get("meta") or {}).get("href", "")
             else:
-                positions, missing = get_positions()
+                gp = get_positions()
+                if gp is None:
+                    # rate limited - skip supply this cycle
+                    continue
+                positions, missing = gp
+
                 payload = build_customerorder_payload(
                     supply_number=number,
                     comment=comment,
@@ -153,7 +182,11 @@ def run_once(cfg: Config) -> None:
         if status == READY and not rec.get("move_done"):
             rec["ready_seen"] = True
 
-            positions, _ = get_positions()
+            gp = get_positions()
+            if gp is None:
+                continue
+            positions, _ = gp
+
             ok, created, reason = create_move_with_applicable(
                 ms,
                 name=number,
@@ -168,7 +201,7 @@ def run_once(cfg: Config) -> None:
             )
 
             if reason == "duplicate_number":
-                # твое правило: номер занят => забываем, demand тоже не делаем
+                # номер занят => забываем, demand тоже не делаем
                 rec["final"] = True
                 rec["final_reason"] = "move_duplicate_number"
                 log.warning("Move duplicate number => final: %s", number)
@@ -184,8 +217,7 @@ def run_once(cfg: Config) -> None:
                 rec["move_error"] = reason
                 log.warning("Move not done (%s): %s", reason, number)
 
-        # ===================== Demand (for ANY status except CANCELLED) =====================
-        # Требование: для любого статуса кроме CANCELLED проверить/создать demand, включая COMPLETED
+        # ===================== Demand (ANY status except CANCELLED) =====================
         if not rec.get("demand_done"):
             existing_d = find_by_name(ms, "demand", number)
             if existing_d:
@@ -196,7 +228,11 @@ def run_once(cfg: Config) -> None:
                 log.info("Demand exists => final: %s", number)
                 continue
 
-            positions, _ = get_positions()
+            gp = get_positions()
+            if gp is None:
+                continue
+            positions, _ = gp
+
             ok, created, reason = create_demand_with_applicable(
                 ms,
                 name=number,
@@ -230,6 +266,5 @@ def run_once(cfg: Config) -> None:
                 log.info("%s Demand => final: %s", "[DRY_RUN] Would create" if cfg.dry_run else "Created", number)
                 continue
 
-    # persist
     store.save(state)
     cache.save()
