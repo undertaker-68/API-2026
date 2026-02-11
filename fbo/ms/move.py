@@ -1,39 +1,80 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
-import requests
+from typing import Any, Dict, Optional, Tuple
 
 from fbo.ms.client import MoySkladClient
+from fbo.ms.errors import is_duplicate_number
+from fbo.ms.find_by_name import find_by_name
 
 
-DUPLICATE_MSG = "Документ с таким номером уже существует"
+def _ms_meta(ms: MoySkladClient, entity: str, id_: str) -> Dict[str, Any]:
+    return {
+        "meta": {
+            "href": f"{ms.base_url}/entity/{entity}/{id_}",
+            "type": entity,
+            "mediaType": "application/json",
+        }
+    }
 
 
-def move_find_by_name(ms: MoySkladClient, name: str) -> Optional[Dict[str, Any]]:
-    data = ms.get("/entity/move", params={"filter": f"name={name}"})
-    rows = data.get("rows") or []
-    return rows[0] if rows else None
+def _ms_meta_href(href: str, type_: str) -> Dict[str, Any]:
+    return {"meta": {"href": href, "type": type_, "mediaType": "application/json"}}
 
 
-def move_create_with_applicable_fallback(ms: MoySkladClient, payload: Dict[str, Any]) -> Dict[str, Any]:
+def find_move(ms: MoySkladClient, name: str):
+    return find_by_name(ms, "move", name)
+
+
+def create_move_with_applicable(
+    ms: MoySkladClient,
+    *,
+    name: str,
+    description: str,
+    org_id: str,
+    agent_id: str,
+    state_id: str,
+    source_store_id: str,
+    target_store_id: str,
+    positions: list[dict],
+    customerorder_href: Optional[str] = None,  # <-- важно: для связки
+    dry_run: bool,
+) -> Tuple[bool, Dict[str, Any] | None, str]:
     """
-    applicable=True по умолчанию.
-    Если МС ругнулся при сохранении/проведении — пробуем applicable=False.
+    returns (created_or_exists, created_doc_or_none, reason)
+    reason: ok | dry_run | duplicate_number | error_applicable_failed
     """
-    try:
-        return ms.post("/entity/move", payload)
-    except requests.HTTPError as e:
-        text = ""
+
+    existing = find_move(ms, name)
+    if existing:
+        return True, existing, "ok"
+
+    payload_base: Dict[str, Any] = {
+        "name": name,
+        "description": description,
+        "organization": _ms_meta(ms, "organization", org_id),
+        "agent": _ms_meta(ms, "counterparty", agent_id),
+        "state": _ms_meta(ms, "state", state_id),
+        "sourceStore": _ms_meta(ms, "store", source_store_id),
+        "targetStore": _ms_meta(ms, "store", target_store_id),
+        "positions": positions,
+    }
+
+    # связка с CustomerOrder (чтобы в МС была "Связанные документы")
+    if customerorder_href:
+        payload_base["customerOrder"] = _ms_meta_href(customerorder_href, "customerorder")
+
+    if dry_run:
+        return True, None, "dry_run"
+
+    # applicable True -> если ошибка, пробуем applicable False
+    for applicable in (True, False):
+        payload = dict(payload_base)
+        payload["applicable"] = applicable
         try:
-            text = e.response.text or ""
-        except Exception:
-            pass
+            created = ms.post("/entity/move", payload)
+            return True, created, "ok"
+        except Exception as e:
+            if is_duplicate_number(e):
+                return False, None, "duplicate_number"
 
-        # дубль номера — наружу, runner решит "финал"
-        if DUPLICATE_MSG in text:
-            raise
-
-        # fallback applicable=false
-        payload2 = dict(payload)
-        payload2["applicable"] = False
-        return ms.post("/entity/move", payload2)
+    return False, None, "error_applicable_failed"
