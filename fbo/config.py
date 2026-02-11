@@ -8,6 +8,10 @@ from dotenv import load_dotenv
 load_dotenv(override=False)
 
 
+def _here(*parts: str) -> str:
+    return os.path.join(os.path.dirname(__file__), *parts)
+
+
 @dataclass(frozen=True)
 class Config:
     # Ozon
@@ -50,9 +54,10 @@ class Config:
     last_days: int = 20
     min_date_utc: datetime = datetime(2026, 2, 2, tzinfo=timezone.utc)
 
-    # Paths
-    state_path: str = os.path.join(os.path.dirname(__file__), "data", "fbo_state.json")
-    ms_article_cache_path: str = os.path.join(os.path.dirname(__file__), "data", "ms_article_cache.json")
+    # Paths (main.py ожидает log_path)
+    state_path: str = _here("data", "fbo_state.json")
+    ms_article_cache_path: str = _here("data", "ms_article_cache.json")
+    log_path: str = _here("logs", "fbo.log")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -109,9 +114,7 @@ def get_config() -> Config:
     dry_run = os.getenv("FBO_DRY_RUN", os.getenv("DRY_RUN", "0")).strip() == "1"
     log_level = os.getenv("FBO_LOG_LEVEL", os.getenv("LOG_LEVEL", "INFO")).strip().upper()
 
-    # window
     last_days = _env_int("FBO_LAST_DAYS", 20)
-    # min date must be 2026-02-02 inclusive
     min_date_utc = datetime(2026, 2, 2, tzinfo=timezone.utc)
 
     return Config(
