@@ -184,14 +184,34 @@ class OzonSuppliesApi:
 
     @staticmethod
     def warehouse_name(order: dict) -> str:
-        # В /v3/supply-order/get есть drop_off_warehouse (склад назначения)
-        dow = order.get("drop_off_warehouse")
-        if isinstance(dow, dict):
-            for k in ("name", "title"):
-                v = dow.get(k)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
+        """
+        Нам нужен склад назначения (storage_warehouse.name) из блока supplies[0],
+        т.к. drop_off_warehouse — это точка сдачи (кроссдок), а не финальный склад.
+        """
+        supplies = order.get("supplies")
+        if isinstance(supplies, list) and supplies:
+            sw = supplies[0].get("storage_warehouse")
+            if isinstance(sw, dict):
+                name = sw.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+
         return "Склад назначения"
+
+    @staticmethod
+    def planned_moment(order: dict) -> str | None:
+        """
+        Пишем planned дату в МС из supplies[0].storage_warehouse.arrival_date.
+        Это дата прибытия на финальный склад.
+        """
+        supplies = order.get("supplies")
+        if isinstance(supplies, list) and supplies:
+            sw = supplies[0].get("storage_warehouse")
+            if isinstance(sw, dict):
+                v = sw.get("arrival_date")
+                if isinstance(v, str) and v:
+                    return v
+        return None
 
     @staticmethod
     def extract_items_from_bundle_items(bundle_items: list[dict]) -> list[tuple[str, float]]:
