@@ -169,10 +169,17 @@ class OzonSuppliesApi:
     @staticmethod
     def supply_status(order: Dict[str, Any]) -> str:
         st = order.get("state")
+
+        # если уже строка статуса (READY_TO_SUPPLY, IN_TRANSIT...)
+        if isinstance(st, str) and st and not st.isdigit():
+            return st.strip()
+
+        # если число или строка-число
         try:
             st_i = int(st)
         except Exception:
             return "UNKNOWN"
+
         return STATE_NAME.get(st_i, f"STATE_{st_i}")
 
     @staticmethod

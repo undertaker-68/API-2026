@@ -21,15 +21,8 @@ from fbo.sync.mapper import build_positions_from_items, build_customerorder_payl
 
 log = logging.getLogger("fbo.sync")
 
-FINAL_STATUSES = {"COMPLETED", "REJECTED_AT_SUPPLY_WAREHOUSE", "CANCELLED"}
 READY = "READY_TO_SUPPLY"
-DEMAND_TRIGGER_STATUSES = {
-    "ACCEPTED_AT_SUPPLY_WAREHOUSE",
-    "IN_TRANSIT",
-    "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
-    "COMPLETED",
-    "REJECTED_AT_SUPPLY_WAREHOUSE",
-}
+CANCELLED = "CANCELLED"
 
 
 def run_once(cfg: Config) -> None:
@@ -56,6 +49,24 @@ def run_once(cfg: Config) -> None:
     supplies = oz_api.list_supply_orders(since, to)
     log.info("Fetched supplies: %d", len(supplies))
 
+    # Диагностика: распределение статусов (можно потом убрать)
+    hist: dict[str, int] = {}
+    sample = None
+    for s in supplies:
+        st_raw = s.get("state")
+        st = oz_api.supply_status(s)
+        hist[st] = hist.get(st, 0) + 1
+        if sample is None:
+            sample = {
+                "order_number": s.get("order_number"),
+                "state_raw": st_raw,
+                "state_parsed": st,
+                "keys": list(s.keys()),
+            }
+    log.info("Status histogram: %s", hist)
+    if sample:
+        log.info("Sample order: %s", sample)
+
     for s in supplies:
         order_id = oz_api.supply_id(s)
         if order_id is None:
@@ -67,7 +78,6 @@ def run_once(cfg: Config) -> None:
         comment = f"{number} - {wh_name}"
 
         rec = state.supplies.get(number) or {}
-        prev_status = rec.get("last_status")
 
         # if already final -> skip everything (but still refresh last seen)
         if rec.get("final") is True:
@@ -87,12 +97,12 @@ def run_once(cfg: Config) -> None:
         state.supplies[number] = rec
 
         # CANCELLED => final immediately
-        if status == "CANCELLED":
+        if status == CANCELLED:
             rec["final"] = True
             rec["final_reason"] = "cancelled"
             continue
 
-        # --- get items once when needed ---
+        # --- get items/positions when needed ---
         def get_positions() -> tuple[list[dict], list[str]]:
             bundle_items = oz_api.get_supply_items(order_id)
             items = oz_api.extract_items_from_bundle_items(bundle_items)
@@ -100,21 +110,18 @@ def run_once(cfg: Config) -> None:
             rec["missing_articles"] = missing
             return positions, missing
 
-        # ========== STEP 1: READY => CustomerOrder + Move ==========
-        if status == READY:
-            rec["ready_seen"] = True
-
-            # CustomerOrder: create even with empty positions (allowed)
+        # ===================== CustomerOrder (always, except CANCELLED) =====================
+        if not rec.get("customerorder_exists") and not rec.get("customerorder_created"):
             existing_co = customerorder_find_by_name(ms, number)
             if existing_co:
                 rec["customerorder_exists"] = True
                 rec["customerorder_href"] = (existing_co.get("meta") or {}).get("href", "")
             else:
-                positions, _missing = get_positions()
+                positions, missing = get_positions()
                 payload = build_customerorder_payload(
                     supply_number=number,
                     comment=comment,
-                    positions=positions,
+                    positions=positions,  # может быть пусто
                     org_id=cfg.ms_org_id,
                     agent_id=cfg.ms_agent_id,
                     sales_channel_id=cfg.ms_sales_channel_fbo_id,
@@ -122,8 +129,12 @@ def run_once(cfg: Config) -> None:
                 )
 
                 if cfg.dry_run:
-                    log.info("[DRY_RUN] Would create CustomerOrder: %s (positions=%d, missing=%d)", number, len(positions), len(_missing))
-                    rec["customerorder_created"] = False
+                    log.info(
+                        "[DRY_RUN] Would create CustomerOrder: %s (pos=%d missing=%d)",
+                        number,
+                        len(positions),
+                        len(missing),
+                    )
                 else:
                     try:
                         created = customerorder_create(ms, payload)
@@ -131,59 +142,51 @@ def run_once(cfg: Config) -> None:
                         rec["customerorder_href"] = (created.get("meta") or {}).get("href", "")
                         log.info("Created CustomerOrder: %s", number)
                     except Exception as e:
-                        # if duplicate number -> final and stop
                         if is_duplicate_number(e):
                             rec["final"] = True
                             rec["final_reason"] = "customerorder_duplicate_number"
-                            log.warning("CustomerOrder duplicate number => final: %s", number)
                             continue
                         rec["customerorder_error"] = error_text(e)
-                        log.exception("CustomerOrder create failed: %s", number)
-                        # не финалим: по твоим словам CO можно создать всегда, но если упало по сети и т.п. — попробуем в следующий цикл
                         continue
 
-            # Move: second stage on READY
-            if not rec.get("move_done"):
-                positions, _ = get_positions()
-                ok, created, reason = create_move_with_applicable(
-                    ms,
-                    name=number,
-                    description=comment,
-                    org_id=cfg.ms_org_id,
-                    agent_id=cfg.ms_agent_id,
-                    state_id=cfg.ms_fbo_move_state_id,
-                    source_store_id=cfg.ms_fbo_move_source_store_id,
-                    target_store_id=cfg.ms_fbo_move_target_store_id,
-                    positions=positions,
-                    dry_run=cfg.dry_run,
-                )
+        # ===================== Move (only on READY) =====================
+        if status == READY and not rec.get("move_done"):
+            rec["ready_seen"] = True
 
-                if reason == "duplicate_number":
-                    # your rule: skip move+demand, final
-                    rec["final"] = True
-                    rec["final_reason"] = "move_duplicate_number"
-                    log.warning("Move duplicate number => final: %s", number)
-                    continue
+            positions, _ = get_positions()
+            ok, created, reason = create_move_with_applicable(
+                ms,
+                name=number,
+                description=comment,
+                org_id=cfg.ms_org_id,
+                agent_id=cfg.ms_agent_id,
+                state_id=cfg.ms_fbo_move_state_id,
+                source_store_id=cfg.ms_fbo_move_source_store_id,
+                target_store_id=cfg.ms_fbo_move_target_store_id,
+                positions=positions,
+                dry_run=cfg.dry_run,
+            )
 
-                if ok:
-                    rec["move_done"] = True
-                    if created:
-                        rec["move_href"] = (created.get("meta") or {}).get("href", "")
-                    log.info("%s Move: %s", "[DRY_RUN] Would create" if cfg.dry_run else "Done", number)
-                else:
-                    rec["move_done"] = False
-                    rec["move_error"] = reason
-                    # если applicable упал дважды -> по ТЗ ставим applicable=false и если всё равно ошибка — просто оставим на повторные попытки
-                    log.warning("Move not done (%s): %s", reason, number)
+            if reason == "duplicate_number":
+                # твое правило: номер занят => забываем, demand тоже не делаем
+                rec["final"] = True
+                rec["final_reason"] = "move_duplicate_number"
+                log.warning("Move duplicate number => final: %s", number)
+                continue
 
-            continue  # READY обработан, дальше demand не создаём в этом же цикле
+            if ok:
+                rec["move_done"] = True
+                if created:
+                    rec["move_href"] = (created.get("meta") or {}).get("href", "")
+                log.info("%s Move: %s", "[DRY_RUN] Would create" if cfg.dry_run else "Done", number)
+            else:
+                rec["move_done"] = False
+                rec["move_error"] = reason
+                log.warning("Move not done (%s): %s", reason, number)
 
-        # ========== STEP 2: Demand on transition from READY ==========
-        transitioned_from_ready = (prev_status == READY and status in DEMAND_TRIGGER_STATUSES)
-        late_final_without_transition = (status in {"COMPLETED", "REJECTED_AT_SUPPLY_WAREHOUSE"} and rec.get("ready_seen") and not rec.get("demand_done"))
-
-        if (transitioned_from_ready or late_final_without_transition) and not rec.get("demand_done"):
-            # check if demand already exists
+        # ===================== Demand (for ANY status except CANCELLED) =====================
+        # Требование: для любого статуса кроме CANCELLED проверить/создать demand, включая COMPLETED
+        if not rec.get("demand_done"):
             existing_d = find_by_name(ms, "demand", number)
             if existing_d:
                 rec["demand_done"] = True
@@ -226,11 +229,6 @@ def run_once(cfg: Config) -> None:
                 rec["final_reason"] = "demand_done"
                 log.info("%s Demand => final: %s", "[DRY_RUN] Would create" if cfg.dry_run else "Created", number)
                 continue
-
-        # ========== STEP 3: hard final by status ==========
-        if status in FINAL_STATUSES:
-            rec["final"] = True
-            rec["final_reason"] = f"final_status_{status}"
 
     # persist
     store.save(state)
