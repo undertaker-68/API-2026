@@ -133,6 +133,10 @@ def run_once(cfg: Config) -> None:
 
                     log.warning("SUPPLY skip number=%s reason=ozon_bundle_http_%s", number, code)
                     return None
+                except Exception as e:
+                    rec["ozon_bundle_last_error"] = str(e)
+                    log.warning("SUPPLY skip number=%s reason=ozon_bundle_error err=%s", number, e)
+                    return None
 
             # ===================== CustomerOrder =====================
             if not rec.get("customerorder_exists") and not rec.get("customerorder_created"):
@@ -143,7 +147,9 @@ def run_once(cfg: Config) -> None:
                 else:
                     gp = get_positions()
                     if gp is None:
+                        log.warning("SUPPLY skip number=%s reason=no_positions (bundle/get error)", number)
                         continue
+
                     positions, missing = gp
 
                     if not positions:
@@ -184,7 +190,9 @@ def run_once(cfg: Config) -> None:
             if status == READY and not rec.get("move_done"):
                 gp = get_positions()
                 if gp is None:
+                    log.warning("SUPPLY skip number=%s reason=no_positions (bundle/get error)", number)
                     continue
+
                 positions, _ = gp
 
                 ok, created, reason = create_move_with_applicable(
@@ -220,7 +228,9 @@ def run_once(cfg: Config) -> None:
 
                     gp = get_positions()
                     if gp is None:
+                        log.warning("SUPPLY skip number=%s reason=no_positions (bundle/get error)", number)
                         continue
+
                     positions, _ = gp
 
                     ok, created, reason = create_demand_with_applicable(
