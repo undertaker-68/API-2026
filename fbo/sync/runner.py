@@ -112,6 +112,7 @@ def run_once(cfg: Config) -> None:
                 try:
                     bundle_items = oz_api.get_supply_items(order_id)
                     items = oz_api.extract_items_from_bundle_items(bundle_items)
+                    log.info("SUPPLY number=%s ozon_items_count=%s", number, len(items) if items else 0)
                     positions, missing = build_positions_from_items(cache, items)
 
                     rec["missing_articles"] = missing
@@ -124,18 +125,23 @@ def run_once(cfg: Config) -> None:
                 except requests.HTTPError as e:
                     resp = getattr(e, "response", None)
                     code = getattr(resp, "status_code", None)
+                    text = getattr(resp, "text", None)
 
                     rec["ozon_bundle_last_error"] = str(e)
+                    rec["ozon_bundle_last_http_code"] = code
+                    if text:
+                        rec["ozon_bundle_last_http_text"] = text[:500]  # чтобы не раздувать state
 
                     if code == 429:
-                        log.warning("SUPPLY skip number=%s reason=ozon_bundle_429", number)
+                        log.warning("SUPPLY skip number=%s reason=ozon_bundle_429 body=%s", number, (text or "")[:200])
                         return None
 
-                    log.warning("SUPPLY skip number=%s reason=ozon_bundle_http_%s", number, code)
+                    log.warning("SUPPLY skip number=%s reason=ozon_bundle_http_%s body=%s", number, code, (text or "")[:200])
                     return None
+
                 except Exception as e:
                     rec["ozon_bundle_last_error"] = str(e)
-                    log.warning("SUPPLY skip number=%s reason=ozon_bundle_error err=%s", number, e)
+                    log.exception("SUPPLY skip number=%s reason=ozon_bundle_error", number)
                     return None
 
             # ===================== CustomerOrder =====================
@@ -147,13 +153,23 @@ def run_once(cfg: Config) -> None:
                 else:
                     gp = get_positions()
                     if gp is None:
-                        log.warning("SUPPLY skip number=%s reason=no_positions (bundle/get error)", number)
-                        continue
+                        log.warning(
+                            "SUPPLY skip number=%s reason=no_positions_fetch_failed http=%s err=%s",
+                            number,
+                            rec.get("ozon_bundle_last_http_code"),
+                            rec.get("ozon_bundle_last_error"),
+                        )
+                        continue        
 
                     positions, missing = gp
 
                     if not positions:
-                        log.warning("SUPPLY skip number=%s reason=empty_positions", number)
+                        log.warning(
+                            "SUPPLY skip number=%s reason=empty_positions missing_articles=%s",
+                            number,
+                            missing,
+                        )
+                        rec["skip_reason"] = "empty_positions"
                         continue
 
                     payload = build_customerorder_payload(
