@@ -215,23 +215,22 @@ def run_once(cfg: Config) -> None:
                 rec["move_error"] = reason
                 log.warning("Move not done (%s): %s", reason, number)
 
-        # ===================== Demand (ANY status except CANCELLED) =====================
         # ===================== Demand (NOT on READY; final when demand exists/created) =====================
         if not rec.get("demand_done"):
-            # если demand уже есть - финалим
-            existing_d = find_by_name(ms, "demand", number)
-            if existing_d:
-                rec["demand_done"] = True
-                rec["demand_href"] = (existing_d.get("meta") or {}).get("href", "")
-                rec["final"] = True
-                rec["final_reason"] = "demand_exists"
-                log.info("Demand exists => final: %s", number)
-                continue
-
-            # На READY demand не создаём
+            # READY - demand не трогаем (даже не проверяем)
             if status == READY or status == "ORDER_STATE_READY_TO_SUPPLY":
                 pass
             else:
+                # если demand уже есть - финалим
+                existing_d = find_by_name(ms, "demand", number)
+                if existing_d:
+                    rec["demand_done"] = True
+                    rec["demand_href"] = (existing_d.get("meta") or {}).get("href", "")
+                    rec["final"] = True
+                    rec["final_reason"] = "demand_exists"
+                    log.info("Demand exists => final: %s", number)
+                    continue
+
                 # На всех остальных статусах создаём demand (если его нет) и финалим
                 gp = get_positions()
                 if gp is None:
