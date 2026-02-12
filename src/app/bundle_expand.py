@@ -65,7 +65,15 @@ def _expand_bundle(ms: MSClient, bundle: dict, qty: int) -> list[dict]:
         if not meta:
             continue
 
+        # 1) пробуем взять цену прямо из assortment (часто урезанный)
         price = ms.get_sale_price(ass)
+
+        # 2) если нет salePrices — догружаем полный объект по meta.href
+        if price is None:
+            href = (meta.get("href") or "").strip()
+            if href:
+                full = ms.get_by_href(href)  # <-- добавь метод в MSClient
+                price = ms.get_sale_price(full)
 
         pos = {
             "assortment": {"meta": meta},

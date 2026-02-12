@@ -166,6 +166,28 @@ class MSClient:
     def get_bundle(self, bundle_id: str) -> dict:
         # expand=components чтобы были компоненты
         return self._get(f"/entity/bundle/{bundle_id}", params={"expand": "components"})
+    
+    def get_by_href(self, href: str) -> dict:
+        """GET entity by absolute meta.href (full object with salePrices)."""
+        href = (href or "").strip()
+        if not href:
+            return {}
+
+        path = None
+        if href.startswith(self.base):
+            path = href[len(self.base):]
+        else:
+            marker = "/api/remap/1.2"
+            if marker in href:
+                path = href.split(marker, 1)[1]
+
+        if not path:
+            path = href
+
+        if not path.startswith("/"):
+            path = "/" + path
+
+        return self._get(path)
 
     # -----------------------------
     # REAL reserve (positions[].reserve)
