@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Tuple, Optional
 
 from fbo.ms.client import MoySkladClient
 
-
 def assortment_find_by_article(ms: MoySkladClient, article: str):
     a = article.strip()
 

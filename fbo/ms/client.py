@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 import random
 import time
-from typing import Any, Dict, Optional
-
 import requests
+from typing import Any, Dict, Optional
 
 
 class MsHttpError(RuntimeError):
@@ -23,14 +22,7 @@ class MsHttpError(RuntimeError):
 
 
 class MoySkladClient:
-    def __init__(
-        self,
-        base_url: str,
-        token: str,
-        rps: float = 3.0,
-        retry_max: int = 6,
-        retry_base_seconds: float = 0.6,
-    ):
+    def __init__(self, base_url: str, token: str, rps: float = 4.0, retry_max: int = 6, retry_base_seconds: float = 0.6):
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update(
@@ -40,58 +32,41 @@ class MoySkladClient:
                 "Content-Type": "application/json",
             }
         )
-        self._min_interval = 1.0 / max(0.1, float(rps))
-        self._last_ts = 0.0
-        self._retry_max = int(retry_max)
-        self._retry_base = float(retry_base_seconds)
+        self.rps = max(0.1, float(rps))
+        self.retry_max = max(0, int(retry_max))
+        self.retry_base = max(0.1, float(retry_base_seconds))
+        self._next_allowed_ts = 0.0
 
     def _throttle(self) -> None:
         now = time.time()
-        delta = now - self._last_ts
-        if delta < self._min_interval:
-            time.sleep(self._min_interval - delta)
-        self._last_ts = time.time()
+        if now < self._next_allowed_ts:
+            time.sleep(self._next_allowed_ts - now)
+        # разрешаем следующий запрос через 1/rps
+        self._next_allowed_ts = time.time() + (1.0 / self.rps)
 
-    def _request(
-        self,
-        method: str,
-        path_or_url: str,
-        *,
-        params: Optional[Dict[str, Any]] = None,
-        payload: Optional[Dict[str, Any]] = None,
-        timeout: int = 60,
-    ) -> Dict[str, Any]:
-        if path_or_url.startswith("http"):
-            full = path_or_url
-        else:
-            full = self.base_url + path_or_url
+    def _request(self, method: str, path: str, *, params=None, payload=None, timeout: int = 60) -> Dict[str, Any]:
+        url = self.base_url + path
 
-        last_err: Exception | None = None
-        for attempt in range(1, self._retry_max + 1):
+        last_err: Optional[MsHttpError] = None
+        for attempt in range(self.retry_max + 1):
             self._throttle()
-            try:
-                if method == "GET":
-                    r = self.session.get(full, params=params, timeout=timeout)
-                else:
-                    r = self.session.post(full, json=payload, timeout=timeout)
+            r = self.session.request(method, url, params=params, json=payload, timeout=timeout)
 
-                if r.status_code in (429,) or 500 <= r.status_code < 600:
-                    sleep_s = min(12.0, self._retry_base * (2 ** (attempt - 1)) + random.random() * 0.25)
-                    time.sleep(sleep_s)
-                    continue
-
-                if r.status_code >= 400:
-                    raise MsHttpError(r.status_code, r.text, payload)
-
+            if 200 <= r.status_code < 300:
                 return r.json()
-            except Exception as e:
-                last_err = e
-                time.sleep(min(5.0, 0.2 * attempt))
+
+            # retry on 429 / 503 / 504
+            if r.status_code in (429, 503, 504) and attempt < self.retry_max:
+                base = self.retry_base * (2 ** attempt)
+                jitter = random.uniform(0, 0.25 * base)
+                time.sleep(base + jitter)
                 continue
 
-        if last_err:
-            raise last_err
-        raise RuntimeError("MS request failed")
+            last_err = MsHttpError(r.status_code, r.text, payload=payload)
+            break
+
+        assert last_err is not None
+        raise last_err
 
     def get(self, path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 60) -> Dict[str, Any]:
         return self._request("GET", path, params=params, timeout=timeout)
@@ -100,4 +75,8 @@ class MoySkladClient:
         return self._request("POST", path, payload=payload, timeout=timeout)
 
     def get_by_href(self, href: str, timeout: int = 60) -> Dict[str, Any]:
-        return self._request("GET", href, timeout=timeout)
+        if href.startswith(self.base_url):
+            path = href[len(self.base_url):]
+        else:
+            path = href.replace("https://api.moysklad.ru/api/remap/1.2", "")
+        return self.get(path, timeout=timeout)

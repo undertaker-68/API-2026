@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
-
 from fbo.ms.article_cache import ArticleCache
 
 
@@ -15,29 +14,29 @@ def ms_meta(entity: str, id_: str) -> Dict[str, Any]:
     }
 
 
-def build_positions_from_items(cache: ArticleCache, items: List[Tuple[str, float]]) -> tuple[List[Dict[str, Any]], List[str]]:
+def build_positions_from_items(
+    cache: ArticleCache,
+    items: List[Tuple[str, float]],
+) -> tuple[List[Dict[str, Any]], List[str]]:
+
     positions: List[Dict[str, Any]] = []
     missing: List[str] = []
 
     for article, qty in items:
-        a = (article or "").strip()
-        if not a:
-            continue
-
-        resolved = cache.resolve(a)
+        resolved = cache.resolve(article.strip())
 
         if resolved.kind == "missing" or not resolved.meta:
-            missing.append(a)
+            missing.append(article)
             continue
 
         if resolved.kind == "bundle":
             for c in resolved.components:
-                q = qty * c.qty
                 positions.append(
                     {
-                        "quantity": q,
+                        "quantity": qty * c.qty,
                         "price": c.price,
                         "assortment": {"meta": c.meta},
+                        "reserve": qty * c.qty,
                     }
                 )
         else:
@@ -46,6 +45,7 @@ def build_positions_from_items(cache: ArticleCache, items: List[Tuple[str, float
                     "quantity": qty,
                     "price": resolved.price,
                     "assortment": {"meta": resolved.meta},
+                    "reserve": qty,
                 }
             )
 
@@ -64,6 +64,7 @@ def build_customerorder_payload(
     store_id: str,
     planned_moment: str | None,
 ) -> Dict[str, Any]:
+
     payload: Dict[str, Any] = {
         "name": supply_number,
         "description": comment,
