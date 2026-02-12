@@ -26,7 +26,7 @@ log = logging.getLogger("fbo.sync")
 
 READY = "READY_TO_SUPPLY"
 CANCELLED = "CANCELLED"
-
+IGNORED = {"UNSPECIFIED", "DATA_FILLING", "ORDER_STATE_UNSPECIFIED", "ORDER_STATE_DATA_FILLING"}
 
 def run_once(cfg: Config) -> None:
     oz = OzonClient(cfg.ozon_base_url, cfg.ozon_client_id, cfg.ozon_api_key)
@@ -93,6 +93,12 @@ def run_once(cfg: Config) -> None:
         if status == CANCELLED:
             rec["final"] = True
             rec["final_reason"] = "cancelled"
+            continue
+        
+        # IGNORED => final immediately
+        if status in IGNORED:
+            rec["final"] = True
+            rec["final_reason"] = f"ignored_state:{status}"
             continue
 
         # -------- positions cache per supply per run --------
@@ -210,6 +216,7 @@ def run_once(cfg: Config) -> None:
                 log.warning("Move not done (%s): %s", reason, number)
 
         # ===================== Demand (ANY status except CANCELLED) =====================
+        # ===================== Demand (NOT on READY; final when demand exists/created) =====================
         if not rec.get("demand_done"):
             # если demand уже есть - финалим
             existing_d = find_by_name(ms, "demand", number)
@@ -221,44 +228,46 @@ def run_once(cfg: Config) -> None:
                 log.info("Demand exists => final: %s", number)
                 continue
 
-            gp = get_positions()
-            if gp is None:
-                continue
-            positions, _ = gp
+            # На READY demand не создаём
+            if status == READY or status == "ORDER_STATE_READY_TO_SUPPLY":
+                pass
+            else:
+                # На всех остальных статусах создаём demand (если его нет) и финалим
+                gp = get_positions()
+                if gp is None:
+                    continue
+                positions, _ = gp
 
-            ok, created, reason = create_demand_with_applicable(
-                ms,
-                name=number,
-                description=comment,
-                org_id=cfg.ms_org_id,
-                agent_id=cfg.ms_agent_id,
-                state_id=cfg.ms_fbo_demand_state_id,
-                store_id=cfg.ms_fbo_demand_store_id,
-                positions=positions,
-                customerorder_href=co_href,
-                dry_run=cfg.dry_run,
-            )
+                ok, created, reason = create_demand_with_applicable(
+                    ms,
+                    name=number,
+                    description=comment,
+                    org_id=cfg.ms_org_id,
+                    agent_id=cfg.ms_agent_id,
+                    state_id=cfg.ms_fbo_demand_state_id,
+                    store_id=cfg.ms_fbo_demand_store_id,
+                    positions=positions,
+                    customerorder_href=co_href,
+                    dry_run=cfg.dry_run,
+                )
 
-            if reason == "duplicate_number":
-                rec["final"] = True
-                rec["final_reason"] = "demand_duplicate_number"
-                log.warning("Demand duplicate number => final: %s", number)
-                continue
+                if reason == "duplicate_number":
+                    rec["final"] = True
+                    rec["final_reason"] = "demand_duplicate_number"
+                    log.warning("Demand duplicate number => final: %s", number)
+                    continue
 
-            if reason == "error_applicable_failed":
-                rec["final"] = True
-                rec["final_reason"] = "demand_applicable_failed"
-                log.warning("Demand applicable failed => final: %s", number)
-                continue
+                if reason == "error_applicable_failed":
+                    rec["final"] = True
+                    rec["final_reason"] = "demand_applicable_failed"
+                    log.warning("Demand applicable failed => final: %s", number)
+                    continue
 
-            if ok:
-                rec["demand_done"] = True
-                if created:
-                    rec["demand_href"] = (created.get("meta") or {}).get("href", "")
-                rec["final"] = True
-                rec["final_reason"] = "demand_done"
-                log.info("%s Demand => final: %s", "[DRY_RUN] Would create" if cfg.dry_run else "Created", number)
-                continue
-
-    store.save(state)
-    cache.save()
+                if ok:
+                    rec["demand_done"] = True
+                    if created:
+                        rec["demand_href"] = (created.get("meta") or {}).get("href", "")
+                    rec["final"] = True
+                    rec["final_reason"] = "demand_done"
+                    log.info("%s Demand => final: %s", "[DRY_RUN] Would create" if cfg.dry_run else "Created", number)
+                    continue

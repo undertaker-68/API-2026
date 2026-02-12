@@ -184,14 +184,49 @@ class OzonSuppliesApi:
 
     @staticmethod
     def warehouse_name(order: dict) -> str:
-        # В /v3/supply-order/get есть drop_off_warehouse (склад назначения)
+        # Нужен конечный склад поставки: supplies[0].storage_warehouse.name
+        supplies = order.get("supplies")
+        if isinstance(supplies, list) and supplies:
+            s0 = supplies[0]
+            if isinstance(s0, dict):
+                sw = s0.get("storage_warehouse")
+                if isinstance(sw, dict):
+                    v = sw.get("name")
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+
+        # fallback: drop_off_warehouse (пункт сдачи)
         dow = order.get("drop_off_warehouse")
         if isinstance(dow, dict):
             for k in ("name", "title"):
                 v = dow.get(k)
                 if isinstance(v, str) and v.strip():
                     return v.strip()
-        return "Склад назначения"
+
+        return "Склад"
+    
+    @staticmethod
+    def planned_moment(order: Dict[str, Any]) -> Optional[str]:
+        """
+        Для МС customerorder.deliveryPlannedMoment:
+        берём timeslot.timeslot.from (fallback to) и отдаём в формате МС: YYYY-MM-DD HH:mm:ss.000
+        """
+        ts = order.get("timeslot")
+        if isinstance(ts, dict):
+            ts2 = ts.get("timeslot")
+        else:
+            ts2 = None
+
+        src = None
+        if isinstance(ts2, dict):
+            src = ts2.get("from") or ts2.get("to")
+
+        dt = parse_utc(src if isinstance(src, str) else None)
+        if not dt:
+            return None
+
+        # МС в вашем проекте шлёт момент как "YYYY-MM-DD HH:mm:ss.000"
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.000")
 
     @staticmethod
     def extract_items_from_bundle_items(bundle_items: list[dict]) -> list[tuple[str, float]]:
