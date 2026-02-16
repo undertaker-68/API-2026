@@ -11,7 +11,29 @@ from src.app.bundle_expand import expand_offer
 log = logging.getLogger("sync")
 
 OZON_MARK = "ozon"  # метка в description
+def ozon_list_all(ozon: OzonClient, cutoff_from: str, cutoff_to: str, status: str, limit: int = 50) -> list[dict]:
+    """Забирает все postings по статусу через limit/offset."""
+    out: list[dict] = []
+    offset = 0
 
+    while True:
+        resp = ozon.unfulfilled_list(cutoff_from, cutoff_to, status=status, limit=limit, offset=offset)
+        postings = resp.get("result", {}).get("postings") or []
+        out.extend(postings)
+
+        log.info("sync OZON page status=%s offset=%d got=%d total=%d", status, offset, len(postings), len(out))
+
+        if len(postings) < limit:
+            break
+
+        offset += limit
+
+        # защита от бесконечного цикла
+        if offset > 5000:
+            log.warning("sync OZON pagination guard hit status=%s offset=%d", status, offset)
+            break
+
+    return out
 
 def iso_z(d: datetime) -> str:
     return d.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -84,12 +106,11 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
 
     for status in ("awaiting_packaging", "awaiting_deliver", "delivering"):
         try:
-            resp = ozon.unfulfilled_list(cutoff_from, cutoff_to, status=status, limit=50, offset=0)
+            postings = ozon_list_all(ozon, cutoff_from, cutoff_to, status=status, limit=50)
         except Exception as e:
             log.error("sync OZON list status=%s failed: %s", status, e)
             continue
 
-        postings = resp.get("result", {}).get("postings") or []
         log.info("sync OZON list status=%s postings=%d", status, len(postings))
 
         for it in postings:
@@ -245,6 +266,31 @@ def run_once(cfg: Config, store: StateStore, ozon: OzonClient, ms: MSClient, sin
                     st.forgotten = 1
                     store.upsert(st)
                     continue
+                
+            if oz_status == "delivering" and not st.demand_created:
+                positions = build_ms_positions(ms, posting.get("products") or [], st.posting_number)
+                if not positions:
+                    log.warning("MS skip create Demand (FINALIZE) posting=%s: positions=0 (unmapped)", st.posting_number)
+                else:
+                    try:
+                        if not cfg.dry_run:
+                            ms.create_demand({
+                                "organization": {"meta": {"href": f"{ms.base}/entity/organization/{cfg.org_id}", "type": "organization"}},
+                                "agent": {"meta": {"href": f"{ms.base}/entity/counterparty/{cfg.agent_id}", "type": "counterparty"}},
+                                "store": {"meta": {"href": f"{ms.base}/entity/store/{cfg.store_ozon_id}", "type": "store"}},
+                                "customerOrder": {"meta": {"href": f"{ms.base}/entity/customerorder/{order_id}", "type": "customerorder"}},
+                                "positions": positions,
+                            })
+                        st.demand_created = 1
+                        log.info("MS create Demand (FINALIZE) posting=%s order_id=%s -> demand_created=1", st.posting_number, order_id)
+                    except Exception as e:
+                        msg = str(e)
+                        log.error("MS create Demand (FINALIZE) failed posting=%s: %s", st.posting_number, msg)
+                        if "3007" in msg or "нет на складе" in msg.lower():
+                            log.warning("MS Demand blocked by stock (FINALIZE), FORGET posting=%s", st.posting_number)
+                            st.forgotten = 1
+                        store.upsert(st)
+                        continue
 
             if oz_status in ("delivered", "delivering"):
                 st.forgotten = 1
